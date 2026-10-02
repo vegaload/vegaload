@@ -1,7 +1,8 @@
 # examples
 
-- [`sample-app/`](./sample-app) -- a tiny HTTP service to load test (not
-  part of VegaLoad itself; its own `go.mod`).
+- [`sample-app/`](./sample-app) -- a tiny service to load test over
+  HTTP/1.1, HTTP/2, WebSocket, and gRPC (not part of VegaLoad itself; its
+  own `go.mod`).
 - [`scenarios/`](./scenarios) -- ready-to-run `vegaload` commands and one
   scripted scenario file, both against `sample-app`.
 

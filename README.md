@@ -42,7 +42,8 @@ comment.
 ## Getting started
 
 Everything below uses [`examples/sample-app`](./examples/sample-app), a
-small HTTP service with injected latency and a ~3% failure rate, built
+small widgets service with injected latency and a ~3% failure rate on
+creates, served over HTTP/1.1, HTTP/2, WebSocket, and gRPC, built
 specifically so this walkthrough has something real to point `vegaload` at.
 Start it in its own terminal first:
 

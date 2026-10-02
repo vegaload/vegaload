@@ -27,6 +27,33 @@ vegaload run -target http://127.0.0.1:8080/widgets -protocol http1 \
   -vus 10 -duration 30s -out baseline.json
 ```
 
+### The same widgets over the other protocols
+
+The sample app serves the same data over every protocol VegaLoad speaks
+(see [`../sample-app/README.md`](../sample-app/README.md) for each
+endpoint's behavior):
+
+```
+# HTTP/2, over plain TCP (h2c) on the same port
+vegaload run -target http://127.0.0.1:8080/widgets -protocol http2 -vus 10 -duration 30s
+
+# WebSocket: connect, send one message, wait for its echo
+vegaload run -target ws://127.0.0.1:8080/ws/echo -protocol websocket -body hello -vus 10 -duration 30s
+
+# gRPC: the standard health check, then the widget service
+vegaload run -target 127.0.0.1:9090 -protocol grpc \
+  -method /grpc.health.v1.Health/Check -vus 10 -duration 30s
+vegaload run -target 127.0.0.1:9090 -protocol grpc \
+  -method /widgets.v1.WidgetService/GetWidget -body $'\x08\x02' -vus 10 -duration 30s
+
+# gRPC create, with the same ~3% injected failure as POST /widgets
+vegaload run -target 127.0.0.1:9090 -protocol grpc \
+  -method /widgets.v1.WidgetService/CreateWidget -body $'\x0a\x06flange' -vus 10 -duration 30s
+```
+
+A gRPC `-body` is already-encoded protobuf (`$'...'` is bash/zsh syntax for
+those bytes); the sample app's README explains how the two above are built.
+
 ## 2. Explain the results
 
 ```

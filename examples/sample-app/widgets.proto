@@ -1,0 +1,47 @@
+// The sample app's gRPC contract, served on -grpc-addr (default
+// 127.0.0.1:9090) alongside the standard grpc.health.v1.Health service.
+//
+// The server (grpc.go) speaks this on the wire without generated code,
+// so this file is documentation and a client contract: point grpcurl at
+// it with -proto, or generate stubs from it in any language.
+//
+// Keeping it in sync: grpc.go encodes and decodes these messages by field
+// number, and protocols_test.go builds a matching descriptor by hand.
+// Change a field here and both of those must change too, or the tests
+// (which check the server against that descriptor) will fail. As with
+// any protobuf API, never reuse or renumber an existing field number:
+// clients already sending it would be silently misread.
+syntax = "proto3";
+
+package widgets.v1;
+
+service WidgetService {
+  // Lists every widget. 10-40ms simulated latency.
+  rpc ListWidgets(ListWidgetsRequest) returns (ListWidgetsResponse);
+
+  // One widget, or NOT_FOUND. 10-40ms simulated latency.
+  rpc GetWidget(GetWidgetRequest) returns (Widget);
+
+  // Creates a widget. 20-60ms simulated latency, and ~3% of calls fail
+  // with UNAVAILABLE on purpose. INVALID_ARGUMENT if name is empty.
+  rpc CreateWidget(CreateWidgetRequest) returns (Widget);
+}
+
+message Widget {
+  int64 id = 1;
+  string name = 2;
+}
+
+message ListWidgetsRequest {}
+
+message ListWidgetsResponse {
+  repeated Widget widgets = 1;
+}
+
+message GetWidgetRequest {
+  int64 id = 1;
+}
+
+message CreateWidgetRequest {
+  string name = 1;
+}
