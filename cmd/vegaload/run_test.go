@@ -127,10 +127,9 @@ func TestRunScenario_ProtocolDirectHTTP1(t *testing.T) {
 	if result.Total == 0 {
 		t.Error("expected at least one recorded iteration")
 	}
-	// Not asserting Failed == 0: a request still in flight exactly when
-	// the executor's duration elapses and its context is cancelled can
-	// legitimately fail with context.Canceled — the same reason
-	// internal/engine's own FixedVUs tests only assert Total() != 0.
+	if result.Failed != 0 {
+		t.Errorf("Failed = %d, want 0 (run-end cancellations must not count as failures)", result.Failed)
+	}
 }
 
 func TestRunScenario_ScriptedJS(t *testing.T) {
@@ -156,9 +155,9 @@ func TestRunScenario_ScriptedJS(t *testing.T) {
 	if result.Total == 0 {
 		t.Error("expected at least one recorded iteration")
 	}
-	// A JS iteration interrupted exactly at shutdown can also come back
-	// as a failure (see the comment in the protocol-direct test above);
-	// Total() > 0 is the meaningful assertion here.
+	if result.Failed != 0 {
+		t.Errorf("Failed = %d, want 0 (run-end cancellations must not count as failures)", result.Failed)
+	}
 }
 
 func TestRunScenario_ScriptedJS_BadScriptFailsFast(t *testing.T) {

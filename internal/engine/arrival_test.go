@@ -78,3 +78,22 @@ func TestConstantArrivalRate_RejectsNonPositiveRate(t *testing.T) {
 		t.Error("expected an error for Rate <= 0, got nil")
 	}
 }
+
+func TestConstantArrivalRate_DoesNotRecordRunEndCancellation(t *testing.T) {
+	rec := NewSummary()
+	iter := func(ctx context.Context) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+
+	c := ConstantArrivalRate{Rate: 50, Dur: 50 * time.Millisecond, MaxVUs: 10}
+	if err := c.Run(context.Background(), iter, rec); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if rec.Failed() != 0 {
+		t.Fatalf("Failed() = %d, want 0 (in-flight arrivals cut off at run end)", rec.Failed())
+	}
+	if rec.Total() != 0 {
+		t.Fatalf("Total() = %d, want 0", rec.Total())
+	}
+}

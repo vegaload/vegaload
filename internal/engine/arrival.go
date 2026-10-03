@@ -82,7 +82,7 @@ func (c ConstantArrivalRate) Run(ctx context.Context, iter IterationFunc, rec Re
 					defer func() { <-sem }()
 					start := time.Now()
 					err := iter(ctx)
-					rec.Record(IterationResult{
+					recordIteration(ctx, rec, IterationResult{
 						VUID:     id,
 						Start:    start,
 						Duration: time.Since(start),

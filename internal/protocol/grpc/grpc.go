@@ -22,28 +22,28 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/encoding"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
 	"github.com/vegaload/vegaload/internal/protocol"
 )
 
-// rawCodecName is the content-subtype this driver asks grpc-go to use
-// instead of its default "proto" codec, via grpc.CallContentSubtype.
-const rawCodecName = "vegaload-raw"
-
-func init() {
-	encoding.RegisterCodec(rawCodec{})
-}
-
 // rawCodec marshals and unmarshals gRPC messages as plain []byte, with no
 // protobuf encoding step — what the driver sends is exactly the bytes in
 // protocol.Target.Body, and what it gets back is exactly the bytes the
 // server sent.
+//
+// The codec is applied with grpc.ForceCodec so VegaLoad can pass raw
+// bytes without compiling proto stubs. CallContentSubtype("proto") is
+// paired with it so the wire Content-Type stays application/grpc+proto
+// (what stock servers expect). Using a custom subtype like vegaload-raw
+// would make grpc-go warn today and reject the call in a future release.
 type rawCodec struct{}
 
-func (rawCodec) Name() string { return rawCodecName }
+// Name is required by encoding.Codec. ForceCodec would advertise it as
+// the content-subtype unless CallContentSubtype overrides it; we always
+// override to "proto", so this value never appears on the wire.
+func (rawCodec) Name() string { return "vegaload-raw" }
 
 func (rawCodec) Marshal(v any) ([]byte, error) {
 	b, ok := v.([]byte)
@@ -97,7 +97,10 @@ func New(target protocol.Target, timeout time.Duration) (*Driver, error) {
 	// that point surfaces as a failed Result, not an error here.
 	conn, err := grpc.NewClient(addr,
 		grpc.WithTransportCredentials(creds),
-		grpc.WithDefaultCallOptions(grpc.CallContentSubtype(rawCodecName)),
+		grpc.WithDefaultCallOptions(
+			grpc.ForceCodec(rawCodec{}),
+			grpc.CallContentSubtype("proto"),
+		),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("grpc: %w", err)

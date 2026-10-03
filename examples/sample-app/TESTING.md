@@ -61,8 +61,7 @@ time.
 ```
 
 Expected: about 600 requests, p50 about 25ms, p99 about 40ms (the endpoint's
-10-40ms injected latency). Errors should be zero. See
-[Known caveats](#known-caveats) for why you'll see about one per VU.
+10-40ms injected latency). Errors should be zero.
 
 **Under load, writes (where the failures are):**
 
@@ -118,8 +117,7 @@ Type a line and it comes straight back. Ctrl-C to quit.
 
 Each iteration opens a connection, sends `hello`, waits for the echo, and
 closes. Expected: about 1,400 iterations, p50 about 10ms (the 5-15ms echo
-latency plus the handshake). Errors should be zero, apart from the caveat
-below.
+latency plus the handshake). Errors should be zero.
 
 Omit `-body` to measure the handshake alone (connect and close, no
 message). It runs much faster, because the echo latency only applies to
@@ -206,19 +204,3 @@ go test ./...
 These run in-process (no running app needed) and cover each protocol.
 CI runs them as a separate step, because this directory is its own Go
 module and the repository's root `go test ./...` doesn't reach it.
-
-## Known caveats
-
-These are in VegaLoad itself, not the sample app. They're noted here so
-they aren't mistaken for sample-app faults.
-
-- **About one failure per VU on every run.** At the end of a run, the
-  engine records the request each VU had in flight when time ran out as
-  a failure (`internal/engine/vu.go`). So a 5-VU run of an endpoint that
-  never fails shows about 5 errors, and a 20-VU run about 20. Subtract that
-  when reading error rates, especially for short runs.
-- **gRPC content-subtype.** VegaLoad's gRPC driver sends
-  `application/grpc+vegaload-raw`. The sample app accepts any subtype
-  (see `wireCodec` in [`grpc.go`](./grpc.go)). Real servers may not:
-  stock grpc-go currently accepts it with a logged warning, and other
-  implementations may reject it.

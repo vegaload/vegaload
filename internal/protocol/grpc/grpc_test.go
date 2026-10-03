@@ -2,10 +2,14 @@ package grpc
 
 import (
 	"context"
+	"io"
 	"net"
+	"net/http"
 	"testing"
 	"time"
 
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 
@@ -27,13 +31,18 @@ func echoHandler(_ any, stream grpc.ServerStream) error {
 
 // newEchoServer starts an in-process plaintext gRPC server that echoes
 // back whatever raw bytes it receives, for any method name.
+// ForceServerCodec(rawCodec{}) matches how the driver ForceCodecs on
+// the client: both sides pass []byte through without protobuf stubs.
 func newEchoServer(t *testing.T) (addr string, stop func()) {
 	t.Helper()
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("net.Listen: %v", err)
 	}
-	srv := grpc.NewServer(grpc.UnknownServiceHandler(echoHandler))
+	srv := grpc.NewServer(
+		grpc.ForceServerCodec(rawCodec{}),
+		grpc.UnknownServiceHandler(echoHandler),
+	)
 	go srv.Serve(lis) //nolint:errcheck // Stop() below ends the test either way
 
 	return lis.Addr().String(), srv.Stop
@@ -172,5 +181,54 @@ func TestDriver_Name(t *testing.T) {
 
 	if d.Name() != "grpc" {
 		t.Errorf("Name() = %q, want %q", d.Name(), "grpc")
+	}
+}
+
+// TestDriver_SendsStandardGRPCContentType asserts the driver advertises
+// application/grpc+proto on the wire — not a custom subtype that stock
+// grpc-go only accepts with a deprecation warning.
+func TestDriver_SendsStandardGRPCContentType(t *testing.T) {
+	saw := make(chan string, 1)
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	srv := &http.Server{
+		Handler: h2c.NewHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			select {
+			case saw <- r.Header.Get("Content-Type"):
+			default:
+			}
+			// Drain the request body so the client can finish sending;
+			// we intentionally do not speak a full gRPC response.
+			_, _ = io.Copy(io.Discard, r.Body)
+			w.Header().Set("Content-Type", "application/grpc")
+			w.WriteHeader(http.StatusOK)
+		}), &http2.Server{}),
+	}
+	go srv.Serve(lis) //nolint:errcheck
+	defer srv.Close()
+
+	d, err := New(protocol.Target{
+		URL:    lis.Addr().String(),
+		Method: "/vegaload.test.Echo/Call",
+		Body:   []byte("ping"),
+	}, 500*time.Millisecond)
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	defer d.Close()
+
+	// Do may fail (this handler is not a real gRPC peer); we only care
+	// that the Content-Type it sent is the standard one.
+	_, _ = d.Do(context.Background())
+
+	select {
+	case ct := <-saw:
+		if ct != "application/grpc+proto" && ct != "application/grpc" {
+			t.Fatalf("Content-Type = %q, want application/grpc or application/grpc+proto", ct)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for Content-Type from driver request")
 	}
 }

@@ -76,12 +76,11 @@ import (
 //     exactly as it would on a normal server.
 //
 // It is installed with grpc.ForceServerCodec (see newGRPCServer), which
-// makes the server ignore the content-subtype entirely. That matters for
-// VegaLoad: its gRPC driver sends "application/grpc+vegaload-raw", a
-// subtype no standard server has a codec for. Stock grpc-go servers
-// currently fall back to proto with a logged warning (and say a future
-// release will reject it instead); forcing the codec here means the
-// sample app accepts VegaLoad's requests regardless of that.
+// makes the server ignore the content-subtype entirely. That lets the
+// WidgetService handlers work with raw []byte while the generated health
+// service still uses proto.Message — one codec covering both paths —
+// and keeps the sample app tolerant of clients that send unusual
+// subtypes (see TestGRPCAcceptsRawBytesClients).
 type wireCodec struct{}
 
 // Name is required by the encoding.Codec interface. With

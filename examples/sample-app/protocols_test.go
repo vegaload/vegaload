@@ -354,10 +354,11 @@ func TestGRPCCreateWidget_Errors(t *testing.T) {
 	}
 }
 
-// rawClientCodec mimics VegaLoad's gRPC driver: raw bytes in and out,
-// under a content-subtype no standard server knows. It is registered
-// under its own test-only name, so it can't clash with anything the real
-// driver registers.
+// rawClientCodec sends raw bytes under a content-subtype no standard
+// server knows. It is registered under a test-only name so it can't
+// clash with stock codecs. VegaLoad's own driver uses ForceCodec with
+// the standard "proto" subtype instead; this client exists to prove the
+// sample app's ForceServerCodec still accepts unusual subtypes.
 type rawClientCodec struct{}
 
 func (rawClientCodec) Name() string                  { return "vegaload-raw-test" }
@@ -367,12 +368,9 @@ func (rawClientCodec) Unmarshal(data []byte, v any) error {
 	return nil
 }
 
-// TestGRPCAcceptsRawBytesClients is the test closest to how VegaLoad
-// itself talks to the app. It sends hand-written bytes under a
-// non-standard content-subtype, using the same bytes the README gives
-// for -body, and checks the server answers instead of rejecting an
-// unknown codec. This is the behavior ForceServerCodec buys (see
-// wireCodec in grpc.go).
+// TestGRPCAcceptsRawBytesClients checks that ForceServerCodec (see
+// wireCodec in grpc.go) lets the app answer raw-byte clients even when
+// they advertise a non-standard content-subtype.
 func TestGRPCAcceptsRawBytesClients(t *testing.T) {
 	encoding.RegisterCodec(rawClientCodec{})
 	conn := startGRPC(t, newStore())
@@ -385,6 +383,28 @@ func TestGRPCAcceptsRawBytesClients(t *testing.T) {
 	}
 	if err := conn.Invoke(callTimeout(t), "/widgets.v1.WidgetService/GetWidget", []byte("\x08\x01"), &out, opt); err != nil {
 		t.Fatalf("GetWidget with raw bytes: %v", err)
+	}
+	if want := string(encodeWidget(Widget{ID: 1, Name: "sprocket"})); string(out) != want {
+		t.Errorf("GetWidget raw response = %q, want %q", out, want)
+	}
+}
+
+// TestGRPCAcceptsStandardProtoSubtype is how VegaLoad's driver talks to
+// the app after the content-subtype fix: ForceCodec(raw bytes) with
+// CallContentSubtype("proto"), so the wire type is application/grpc+proto.
+func TestGRPCAcceptsStandardProtoSubtype(t *testing.T) {
+	conn := startGRPC(t, newStore())
+	opts := []grpc.CallOption{
+		grpc.ForceCodec(rawClientCodec{}),
+		grpc.CallContentSubtype("proto"),
+	}
+
+	var out []byte
+	if err := conn.Invoke(callTimeout(t), "/grpc.health.v1.Health/Check", []byte{}, &out, opts...); err != nil {
+		t.Fatalf("Health/Check with ForceCodec+proto: %v", err)
+	}
+	if err := conn.Invoke(callTimeout(t), "/widgets.v1.WidgetService/GetWidget", []byte("\x08\x01"), &out, opts...); err != nil {
+		t.Fatalf("GetWidget with ForceCodec+proto: %v", err)
 	}
 	if want := string(encodeWidget(Widget{ID: 1, Name: "sprocket"})); string(out) != want {
 		t.Errorf("GetWidget raw response = %q, want %q", out, want)
