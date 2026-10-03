@@ -10,6 +10,8 @@
 vendor/
 
 # Local scenario run artifacts
+vegaload-report-*.html
+vegaload-mcp-report-*.html
 *.vl-report.html
 *.vl-report.json
 
