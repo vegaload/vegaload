@@ -77,10 +77,27 @@ nothing else to host.
 ```
 
 scaffolds `my-scenario.vl.js` (JavaScript by default; `-python` for a
-`.py` scenario shelling out to a local `python3`). VegaLoad's scripting
-runtimes can't make network calls yet (see `AGENTS.md`), so today a scenario
-file is for your own per-iteration logic against VegaLoad's VU pool and
-executor shapes (fixed-VU, ramp, step, constant-arrival-rate) —
+`.py` scenario shelling out to a local `python3`). A scenario's `http` and
+`ws` globals make real HTTP and WebSocket calls, carrying a value from one
+into the next — a script can create something over HTTP, then open a
+WebSocket and read frames until it's done, the way
+[`examples/scenarios/http-ws-chain.vl.js`](./examples/scenarios/http-ws-chain.vl.js)
+does against the sample app (its Python twin,
+[`http_ws_chain.py`](./examples/scenarios/http_ws_chain.py), does the same
+thing):
+
+```
+./vegaload run -vus 5 -duration 10s examples/scenarios/http-ws-chain.vl.js
+```
+
+(flags before the scenario file — `vegaload`'s flag parser stops at the
+first non-flag argument; run `vegaload run -h` for the full flag list.) A
+host outside localhost needs `-allow-target` or `-yes` — the same FR-CLI-06
+allowlist protocol-direct mode's `-target` uses, just enforced per call
+since a script's own targets aren't known until it runs. A scenario with no
+network calls at all is still useful for pure per-iteration logic against
+VegaLoad's VU pool and executor shapes (fixed-VU, ramp, step,
+constant-arrival-rate) —
 [`examples/scenarios/smoke.vl.js`](./examples/scenarios/smoke.vl.js) is a
 minimal one:
 
@@ -88,12 +105,9 @@ minimal one:
 ./vegaload run -vus 5 -duration 5s examples/scenarios/smoke.vl.js
 ```
 
-(flags before the scenario file — `vegaload`'s flag parser stops at the
-first non-flag argument; run `vegaload run -h` for the full flag list.)
-
-To load test an actual HTTP target today, use protocol-direct mode (step 1)
-instead — or generate a runbook of protocol-direct commands from an OpenAPI
-spec:
+To load test an actual HTTP target without writing a script at all, use
+protocol-direct mode (step 1) instead — or generate a runbook of
+protocol-direct commands from an OpenAPI spec:
 
 ```
 ./vegaload new -from-openapi examples/sample-app/openapi.json sample-app

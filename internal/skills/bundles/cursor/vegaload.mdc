@@ -9,9 +9,9 @@ alwaysApply: false
 `.cursor/mcp.json`). It exposes six tools, each a thin wrapper around a
 `vegaload` CLI command you could run yourself in a terminal:
 
-- `create_scenario` — scaffold a scenario file (`vegaload new`). Scripting
-  can't reach the network yet, so this is only useful for non-network
-  per-iteration logic.
+- `create_scenario` — scaffold a scenario file (`vegaload new`). The
+  scenario's `http`/`ws` globals can make real calls, carrying a value from
+  one into the next, under the same per-call allowlist described below.
 - `run_test` — run a load test against a scenario file or a protocol-direct
   target (`target` + `protocol`). Choose `executor`: `fixed-vus`, `ramp`,
   `step`, or `constant-arrival-rate`. Returns the run's results and, unless

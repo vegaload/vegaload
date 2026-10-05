@@ -339,8 +339,9 @@ func generateFromSpecTool(exePath string) Tool {
 		Description: "Generate a load-test runbook from a JSON OpenAPI spec: one ready-to-run `vegaload run` " +
 			"command per endpoint the spec declares. Equivalent to `vegaload new -from-openapi <spec>`. YAML specs " +
 			"are not supported — convert to JSON first. This does not produce a runnable scenario script, since " +
-			"VegaLoad's scripting runtimes can't reach the network yet; it produces the exact commands to run " +
-			"each endpoint protocol-direct instead.",
+			"a spec describes each endpoint on its own, not how their responses should chain together; it " +
+			"produces the exact command to run each endpoint protocol-direct instead, which you can also use " +
+			"as a checklist for a hand-written scenario if the endpoints should be chained.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{

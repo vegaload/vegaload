@@ -7,8 +7,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -356,5 +358,162 @@ func TestCmdRun_ExitCodes(t *testing.T) {
 	}
 	if code := cmdRun([]string{"-h"}); code != 0 {
 		t.Errorf("exit code for -h = %d, want 0", code)
+	}
+}
+
+// FR-CLI-08: the per-call safety gate a scripted run's http/ws globals
+// enforce, built by buildSafetyCheck from the same allowlist/-yes
+// enforceSafety already uses for a protocol-direct target.
+
+func TestBuildSafetyCheck_AllowsLocalhost(t *testing.T) {
+	cfg := &runConfig{}
+	check := buildSafetyCheck(cfg)
+	if err := check("localhost"); err != nil {
+		t.Errorf("check(localhost) = %v, want nil", err)
+	}
+	if err := check("127.0.0.1"); err != nil {
+		t.Errorf("check(127.0.0.1) = %v, want nil", err)
+	}
+}
+
+func TestBuildSafetyCheck_RejectsUnknownHostWithoutYes(t *testing.T) {
+	cfg := &runConfig{}
+	check := buildSafetyCheck(cfg)
+	err := check("example.com")
+	if err == nil {
+		t.Fatal("expected an error for a non-localhost, non-allowlisted host without -yes")
+	}
+	if !strings.Contains(err.Error(), "example.com") {
+		t.Errorf("error = %q, want it to name the host", err.Error())
+	}
+}
+
+func TestBuildSafetyCheck_YesAllowsAnyHost(t *testing.T) {
+	cfg := &runConfig{Yes: true}
+	check := buildSafetyCheck(cfg)
+	if err := check("example.com"); err != nil {
+		t.Errorf("check(example.com) with -yes = %v, want nil", err)
+	}
+}
+
+func TestBuildSafetyCheck_AllowTargetAllowsListedHost(t *testing.T) {
+	cfg := &runConfig{AllowTargets: []string{"example.com"}}
+	check := buildSafetyCheck(cfg)
+	if err := check("example.com"); err != nil {
+		t.Errorf("check(example.com) with -allow-target = %v, want nil", err)
+	}
+	if err := check("other.com"); err == nil {
+		t.Error("expected an error for a host not on the allowlist")
+	}
+}
+
+func TestRunScenario_ScriptedJS_DisallowedHostHardFailsWithoutYes(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("handler should never be reached when the per-call safety gate refuses the host")
+	}))
+	defer srv.Close()
+	host := strings.TrimPrefix(srv.URL, "http://")
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "scenario.vl.js")
+	// example.com resolves to a well-known, non-localhost address, so
+	// it's never allowed without -yes or -allow-target -- used here as
+	// the stand-in for "some host the safety gate must refuse" without
+	// depending on srv's own loopback address being disallowed (which
+	// it wouldn't be, since localhost is always allowed).
+	src := `export default function () { http.get("http://example.com/"); }`
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatalf("writing scenario: %v", err)
+	}
+	_ = host // srv only establishes that this test's own HTTP listener would notice a stray call; the script never targets it.
+
+	cfg := &runConfig{
+		Executor:     "fixed-vus",
+		VUs:          1,
+		Duration:     100 * time.Millisecond,
+		ScenarioPath: path,
+		Timeout:      time.Second,
+	}
+
+	result, err := runScenario(cfg)
+	if err != nil {
+		t.Fatalf("runScenario returned a hard error: %v (expected the per-iteration failure to be recorded instead)", err)
+	}
+	if result.Failed == 0 {
+		t.Error("expected every iteration to fail: the safety gate should have refused the disallowed host")
+	}
+}
+
+func TestRunScenario_ScriptedJS_AllowTargetLetsCallThrough(t *testing.T) {
+	var called atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called.Store(true)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	host := strings.TrimPrefix(srv.URL, "http://")
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "scenario.vl.js")
+	src := `export default function () {
+		const resp = http.get("` + srv.URL + `");
+		if (resp.status !== 200) { throw new Error("status = " + resp.status); }
+	}`
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatalf("writing scenario: %v", err)
+	}
+
+	cfg := &runConfig{
+		Executor:     "fixed-vus",
+		VUs:          1,
+		Duration:     100 * time.Millisecond,
+		ScenarioPath: path,
+		Timeout:      time.Second,
+		AllowTargets: []string{host},
+	}
+
+	result, err := runScenario(cfg)
+	if err != nil {
+		t.Fatalf("runScenario returned error: %v", err)
+	}
+	if result.Failed != 0 {
+		t.Errorf("Failed = %d, want 0 -- -allow-target should have let the call through", result.Failed)
+	}
+	if !called.Load() {
+		t.Error("expected the script's http.get call to reach the test server")
+	}
+}
+
+func TestRunScenario_ScriptedPython_SafetyGateWiredThrough(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not on PATH, skipping")
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("handler should never be reached when the per-call safety gate refuses the host")
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "scenario.py")
+	src := "def iteration():\n    http.get(\"http://example.com/\")\n"
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatalf("writing scenario: %v", err)
+	}
+
+	cfg := &runConfig{
+		Executor:     "fixed-vus",
+		VUs:          1,
+		Duration:     100 * time.Millisecond,
+		ScenarioPath: path,
+		Timeout:      time.Second,
+	}
+
+	result, err := runScenario(cfg)
+	if err != nil {
+		t.Fatalf("runScenario returned a hard error: %v", err)
+	}
+	if result.Failed == 0 {
+		t.Error("expected every iteration to fail: the safety gate should have refused the disallowed host, for Python the same as JS")
 	}
 }

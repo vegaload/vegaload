@@ -13,10 +13,11 @@ couldn't also do.
 
 ## Tools
 
-- **create_scenario** — scaffold a new scenario file (`vegaload new`). Only
-  useful for scripted scenarios with non-network per-iteration logic; VegaLoad's
-  scripting runtimes can't make network calls yet (see generate_from_spec below
-  for the network case).
+- **create_scenario** — scaffold a new scenario file (`vegaload new`). The
+  scenario's `http`/`ws` globals can make real calls, carrying a value from
+  one into the next (create something over HTTP, then watch it over
+  WebSocket) — the same per-call allowlist `run_test`'s safety gate below
+  describes applies to every one of those calls, not just a `target`.
 - **run_test** — run a load test, either a scenario file or a protocol-direct
   target (`target` + `protocol`, e.g. `http1`). Pick an `executor`: `fixed-vus`
   (steady concurrency), `ramp` (stages that climb then fall), `step` (stages

@@ -17,15 +17,17 @@
 //
 //	vegaload run scenario.vl.js -vus 10 -duration 30s
 //
-// Phase 0 does not yet give a scripted scenario a way to reach the
-// network itself (no http.get-style binding exists in
-// internal/scripting/js today) — that is why the two modes are
-// separate rather than "a script that also hits -target". A script's
-// default export / iteration() function is useful today for anything
-// that doesn't need network I/O (assertions against injected data,
-// pure-compute checks, logging); wiring protocol clients into the
-// scripting runtimes is tracked as follow-up work, not silently
-// pretended to exist here.
+// The two modes stay separate rather than "a script that also hits
+// -target": protocol-direct mode repeats one fixed target as fast and
+// simply as possible, while a scenario file (per FR-CLI-08) can make
+// any number of its own real HTTP/WebSocket calls via the `http`/`ws`
+// globals internal/scripting/js and /python inject into every VU,
+// carrying a value from one call into the next — see those packages'
+// doc comments for a worked example (LaunchPad's create-then-ignite
+// flow). Every one of those calls still goes through the same
+// allowlist FR-CLI-06 built for -target, just enforced per call instead
+// of once up front — see buildSafetyCheck below for why that has to
+// differ from enforceSafety's own one-time, promptable check.
 package main
 
 import (
@@ -51,6 +53,7 @@ import (
 	"github.com/vegaload/vegaload/internal/report"
 	"github.com/vegaload/vegaload/internal/safety"
 	"github.com/vegaload/vegaload/internal/scripting/js"
+	"github.com/vegaload/vegaload/internal/scripting/netapi"
 	"github.com/vegaload/vegaload/internal/scripting/python"
 )
 
@@ -284,9 +287,37 @@ func concurrencyHint(cfg *runConfig) int {
 // run once the executor has finished.
 func buildIteration(cfg *runConfig) (engine.IterationFunc, func() error, error) {
 	if cfg.ScenarioPath != "" {
-		return scriptedIteration(cfg.ScenarioPath, concurrencyHint(cfg))
+		return scriptedIteration(cfg, concurrencyHint(cfg))
 	}
 	return protocolIteration(cfg.Protocol, cfg.Target, cfg.Timeout)
+}
+
+// buildSafetyCheck returns the netapi.SafetyCheck every scripted VU's
+// http/ws globals run before connecting — FR-CLI-08's per-call
+// extension of FR-CLI-06's allowlist, built from the same
+// cfg.AllowTargets/-yes a protocol-direct target is checked against in
+// enforceSafety.
+//
+// It deliberately never prompts the way enforceSafety's interactive
+// y/N confirmation does: a script can make an unbounded number of calls
+// to hosts only it discovers at run time, so there's no single moment
+// to pause the whole run for a human the way there is for one
+// protocol-direct target chosen before the run starts. The approved
+// design is a hard fail instead — a disallowed host always refuses the
+// call unless -yes was passed for the whole run — so a scenario author
+// who wants to hit something outside localhost/-allow-target either
+// allowlists it up front or opts in to the whole run with -yes, the
+// same two ways out enforceSafety already offers, minus the prompt.
+func buildSafetyCheck(cfg *runConfig) netapi.SafetyCheck {
+	return func(host string) error {
+		if safety.IsAllowed(host, cfg.AllowTargets) {
+			return nil
+		}
+		if cfg.Yes {
+			return nil
+		}
+		return fmt.Errorf("host %q is not localhost or allowlisted (pass -yes, or add it with -allow-target)", host)
+	}
 }
 
 // protocolIteration adapts one of the four protocol.Protocol drivers
@@ -332,18 +363,26 @@ func protocolIteration(name string, target protocol.Target, timeout time.Duratio
 	return iter, driver.Close, nil
 }
 
-// scriptedIteration loads path (as JavaScript/TypeScript or Python,
-// decided by extension) and returns an engine.IterationFunc backed by a
-// vuPool sized by concurrency — see vupool.go for why a pool, rather
-// than one shared runtime, is needed here.
-func scriptedIteration(path string, concurrency int) (engine.IterationFunc, func() error, error) {
+// scriptedIteration loads cfg.ScenarioPath (as JavaScript/TypeScript or
+// Python, decided by extension) and returns an engine.IterationFunc
+// backed by a vuPool sized by concurrency — see vupool.go for why a
+// pool, rather than one shared runtime, is needed here.
+//
+// Every VU it creates gets the same netapi.SafetyCheck (built once, via
+// buildSafetyCheck) and cfg.Timeout, so FR-CLI-08's http/ws globals
+// enforce FR-CLI-06's allowlist and respect the run's per-request
+// timeout exactly as -target/-protocol mode's own driver does.
+func scriptedIteration(cfg *runConfig, concurrency int) (engine.IterationFunc, func() error, error) {
+	path := cfg.ScenarioPath
+	check := buildSafetyCheck(cfg)
+
 	if strings.ToLower(filepath.Ext(path)) == ".py" {
 		script, err := python.Load(path)
 		if err != nil {
 			return nil, nil, err
 		}
 		pool := newVUPool(concurrency, func() (iterCloser, error) {
-			return script.NewVU()
+			return script.NewVU(check, cfg.Timeout)
 		})
 		// Validate the script once, up front, the same way
 		// protocol-direct mode's New() fails fast on a bad target,
@@ -360,7 +399,7 @@ func scriptedIteration(path string, concurrency int) (engine.IterationFunc, func
 		return nil, nil, err
 	}
 	pool := newVUPool(concurrency, func() (iterCloser, error) {
-		return script.NewVU()
+		return script.NewVU(check, cfg.Timeout)
 	})
 	if _, err := pool.borrowAndRelease(); err != nil {
 		return nil, nil, err
@@ -405,6 +444,11 @@ func runScenarioWithCollector(cfg *runConfig, collector *report.Collector) (*rep
 // allowlisted target or explicit confirmation (-yes, or an interactive
 // y/N prompt on confirm) before continuing. confirm is a seam for
 // testing; cmdRun passes promptConfirm, which reads a real y/N from in.
+//
+// A scripted run's own network calls are a separate, per-call check —
+// buildSafetyCheck, run against every host a script's http/ws globals
+// connect to as FR-CLI-08 makes those calls — since those hosts aren't
+// known until the script actually runs, unlike -target here.
 func enforceSafety(cfg *runConfig, in io.Reader, out io.Writer, confirm func(io.Reader, io.Writer, string) bool) error {
 	rate := cfg.Rate
 	if err := safety.CheckLimits(cfg.VUs, cfg.Duration, rate, cfg.Limits); err != nil {
@@ -420,7 +464,7 @@ func enforceSafety(cfg *runConfig, in io.Reader, out io.Writer, confirm func(io.
 	}
 
 	if cfg.Target.URL == "" {
-		return nil // scripted run, no protocol-direct target to check
+		return nil // scripted run: no protocol-direct target to check here -- see buildSafetyCheck for its own per-call gate
 	}
 	host, err := safety.TargetHost(cfg.Target.URL)
 	if err != nil {

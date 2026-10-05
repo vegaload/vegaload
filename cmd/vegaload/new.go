@@ -14,13 +14,18 @@ const jsTemplate = `// %s — a VegaLoad scenario.
 // Run it standalone:
 //   vegaload run %s
 //
-// Phase 0 note: a scenario's default export runs on its own — there is
-// no built-in way yet for it to reach the network itself (see
-// run.go's doc comment in the vegaload source, or AGENTS.md). To load
-// test an actual target today, use -target and -protocol instead, e.g.:
-//   vegaload run -target https://example.com -protocol http1 -vus 10 -duration 30s
-// This function is where assertions, logging, or other per-iteration
-// logic goes once scripting can also reach the network.
+// This function runs once per iteration. http and ws are globals every
+// VU gets (see AGENTS.md and internal/scripting/js's doc comment): real
+// HTTP and WebSocket calls, with the response available to carry into
+// the next call -- replace this body with your own flow, e.g.:
+//
+//   const resp = http.get("http://localhost:8080/widgets");
+//   if (!resp.ok) { throw new Error("status " + resp.status); }
+//   const widgets = resp.json();
+//
+// A host outside localhost needs -allow-target or -yes on the run (the
+// same FR-CLI-06 allowlist -target uses) or every call to it fails —
+// see "vegaload run -h".
 export default function () {
   console.log("iteration");
 }
@@ -31,8 +36,19 @@ const pyTemplate = `# %s — a VegaLoad scenario.
 # Run it standalone:
 #   vegaload run %s
 #
-# Phase 0 note: see the .js template's comment (or AGENTS.md) — the same
-# "no network access from scripting yet" limitation applies here.
+# This function runs once per iteration. http and ws are globals every
+# VU gets (see AGENTS.md and internal/scripting/python's doc comment):
+# real HTTP and WebSocket calls, with the response available to carry
+# into the next call -- replace this body with your own flow, e.g.:
+#
+#   resp = http.get("http://localhost:8080/widgets")
+#   if not resp.ok:
+#       raise ValueError("status %d" % resp.status)
+#   widgets = resp.json()
+#
+# A host outside localhost needs -allow-target or -yes on the run (the
+# same FR-CLI-06 allowlist -target uses) or every call to it fails --
+# see "vegaload run -h".
 def iteration():
     print("iteration")
 `
@@ -110,10 +126,13 @@ func cmdNew(args []string) int {
 // cmdNewFromOpenAPI implements FR-MCP-06's `vegaload new --from-openapi
 // <spec>`: it reads a JSON OpenAPI document at specPath and writes a
 // Markdown runbook of ready-to-run `vegaload run` commands, one per
-// endpoint the spec declares. See internal/openapi's doc comment for
-// why this generates a runbook rather than a working scenario script —
-// scripting can't reach the network yet, so a "scenario" that tried to
-// call these endpoints would be misleading rather than useful.
+// endpoint the spec declares, rather than one scripted scenario that
+// chains them all together. See internal/openapi's doc comment: a flat
+// list of per-endpoint protocol-direct commands is what a spec's set of
+// independent endpoints actually maps to; a spec alone doesn't say how
+// their responses should feed into each other the way a hand-written
+// FR-CLI-08 scenario does, so generating one would be guessing at a
+// flow the spec never described.
 func cmdNewFromOpenAPI(name, specPath string, force bool, output string) int {
 	data, err := os.ReadFile(specPath)
 	if err != nil {

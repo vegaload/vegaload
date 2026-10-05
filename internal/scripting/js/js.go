@@ -16,20 +16,44 @@
 //
 // AGENTS.md's first rule is that a test is always a real file; this
 // package's whole job is turning that file into something the engine can
-// call for a VU, and nothing else — it knows nothing about HTTP, gRPC, or
-// WebSocket (the protocol drivers are wired in separately, in cmd/vegaload).
+// call for a VU. Per FR-CLI-08, a VU also gets real HTTP and WebSocket
+// access via the global `http` and `ws` objects described below, backed
+// by internal/scripting/netapi — this package still knows nothing about
+// gRPC, and nothing about FR-CLI-06's allowlist policy itself, only that
+// NewVU is given a netapi.SafetyCheck to run before every call.
+//
+// A scenario can carry a value from one call into the next the way
+// FR-CLI-08's LaunchPad example needs to:
+//
+//	export default function () {
+//	  const created = http.post("http://localhost:8080/launches", { body: JSON.stringify({name: "demo"}) });
+//	  const launch = created.json();
+//	  const conn = ws.connect("ws://localhost:8080/launches/" + launch.id + "/ignite");
+//	  conn.send(JSON.stringify({action: "ignite"}));
+//	  for (;;) {
+//	    const frame = conn.receive(5000);
+//	    if (frame === null) break; // connection closed
+//	    const msg = JSON.parse(frame);
+//	    if (msg.status === "complete" || msg.status === "aborted") break;
+//	  }
+//	  conn.close();
+//	}
 package js
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/dop251/goja"
 	"github.com/evanw/esbuild/pkg/api"
+
+	"github.com/vegaload/vegaload/internal/scripting/netapi"
 )
 
 // Script is a loaded, compiled scenario file, ready to be instantiated
@@ -101,21 +125,49 @@ func loaderFor(path string) api.Loader {
 }
 
 // VU is one virtual user's instance of a Script: its own Goja runtime
-// running its own copy of the script's top-level state, and the default
-// export function pulled out of it. A goja.Runtime is not safe for
-// concurrent use, so the engine must create one VU per virtual user via
-// NewVU — never share a single VU across goroutines.
+// running its own copy of the script's top-level state, the default
+// export function pulled out of it, and (per FR-CLI-08) its own HTTP
+// client and set of open WebSocket connections, scoped to this VU's
+// lifetime the same way the VU's own runtime is. A goja.Runtime is not
+// safe for concurrent use, so the engine must create one VU per virtual
+// user via NewVU — never share a single VU across goroutines.
 type VU struct {
 	vm *goja.Runtime
 	fn goja.Callable
+
+	http        *netapi.HTTPClient
+	safetyCheck netapi.SafetyCheck
+	timeout     time.Duration
+	ctx         context.Context //nolint:containedctx // set per-Iteration; native functions called synchronously from within that same iteration read it to build call/dial contexts.
+
+	openConns []*netapi.WSConn
 }
 
 // NewVU creates a fresh VU from the script: a new runtime, the script's
 // top-level code run once (so top-level state like a counter declared
-// with let/const starts fresh for this VU), and its default export
-// resolved and validated.
-func (s *Script) NewVU() (*VU, error) {
+// with let/const starts fresh for this VU), its default export resolved
+// and validated, and the `http`/`ws` globals wired up.
+//
+// check is run (if non-nil) against the host of every call a script
+// makes through http or ws, before connecting — see
+// internal/scripting/netapi.SafetyCheck's doc comment for why this has
+// to happen per call rather than once up front. timeout bounds each
+// individual HTTP request and WebSocket handshake; it does not bound
+// ws.receive, which takes its own optional timeout argument.
+func (s *Script) NewVU(check netapi.SafetyCheck, timeout time.Duration) (*VU, error) {
 	vm := goja.New()
+	// requestOptions (the http.*/ws.connect options argument) is defined
+	// with `json` tags so its Go field names don't have to match a
+	// script's lowerCamelCase property names (`headers`, not `Headers`);
+	// this mapper is what makes goja's ExportTo honor those tags.
+	vm.SetFieldNameMapper(goja.TagFieldNameMapper("json", true))
+
+	v := &VU{
+		vm:          vm,
+		http:        netapi.NewHTTPClient(check, timeout),
+		safetyCheck: check,
+		timeout:     timeout,
+	}
 
 	exportsObj := vm.NewObject()
 	moduleObj := vm.NewObject()
@@ -129,6 +181,12 @@ func (s *Script) NewVU() (*VU, error) {
 		return nil, fmt.Errorf("js: %w", err)
 	}
 	if err := vm.Set("console", newConsole(vm)); err != nil {
+		return nil, fmt.Errorf("js: %w", err)
+	}
+	if err := vm.Set("http", v.newHTTPGlobal(vm)); err != nil {
+		return nil, fmt.Errorf("js: %w", err)
+	}
+	if err := vm.Set("ws", v.newWSGlobal(vm)); err != nil {
 		return nil, fmt.Errorf("js: %w", err)
 	}
 
@@ -155,8 +213,9 @@ func (s *Script) NewVU() (*VU, error) {
 	if !ok {
 		return nil, fmt.Errorf("js: default export is not a function")
 	}
+	v.fn = fn
 
-	return &VU{vm: vm, fn: fn}, nil
+	return v, nil
 }
 
 // newConsole builds a minimal console object (just log, matching what a
@@ -177,16 +236,215 @@ func newConsole(vm *goja.Runtime) *goja.Object {
 	return c
 }
 
+// throw raises err as a catchable JS exception (a Go Error instance
+// wrapping err, via goja's own NewGoError), rather than a Go panic
+// escaping the runtime. Every native function below uses this instead of
+// returning a Go error, since goja.FunctionCall-shaped functions have no
+// error return of their own — panicking with a *goja.Object is goja's
+// documented way for a native function to signal a JS-visible error.
+func throw(vm *goja.Runtime, err error) {
+	panic(vm.NewGoError(err))
+}
+
+// requestOptions is the shape of the optional second argument to every
+// http.* method and ws.connect: `{ headers, body, insecure }`. All
+// fields are optional; a caller that passes no options object at all
+// gets the zero value.
+type requestOptions struct {
+	Headers  map[string]string `json:"headers"`
+	Body     string            `json:"body"`
+	Insecure bool              `json:"insecure"`
+}
+
+func parseOptions(vm *goja.Runtime, call goja.FunctionCall, argIndex int) requestOptions {
+	var opts requestOptions
+	if len(call.Arguments) <= argIndex {
+		return opts
+	}
+	arg := call.Arguments[argIndex]
+	if goja.IsUndefined(arg) || goja.IsNull(arg) {
+		return opts
+	}
+	if err := vm.ExportTo(arg, &opts); err != nil {
+		throw(vm, fmt.Errorf("js: parsing options: %w", err))
+	}
+	return opts
+}
+
+// newHTTPGlobal builds the `http` object every VU's scripts see:
+// shorthand methods for the common verbs, plus `request` for anything
+// else, each returning a response object a script can inspect and parse
+// -- the value-chaining FR-CLI-08 exists for.
+func (v *VU) newHTTPGlobal(vm *goja.Runtime) *goja.Object {
+	h := vm.NewObject()
+
+	doHTTP := func(method string) func(call goja.FunctionCall) goja.Value {
+		return func(call goja.FunctionCall) goja.Value {
+			if len(call.Arguments) < 1 {
+				throw(vm, errors.New("js: http."+strings.ToLower(method)+"(url[, options]) requires a url argument"))
+			}
+			url := call.Arguments[0].String()
+			opts := parseOptions(vm, call, 1)
+			return v.doHTTPRequest(vm, method, url, opts)
+		}
+	}
+
+	_ = h.Set("get", doHTTP("GET"))
+	_ = h.Set("post", doHTTP("POST"))
+	_ = h.Set("put", doHTTP("PUT"))
+	_ = h.Set("patch", doHTTP("PATCH"))
+	_ = h.Set("delete", doHTTP("DELETE"))
+	_ = h.Set("request", func(call goja.FunctionCall) goja.Value {
+		if len(call.Arguments) < 2 {
+			throw(vm, errors.New("js: http.request(method, url[, options]) requires method and url arguments"))
+		}
+		method := call.Arguments[0].String()
+		url := call.Arguments[1].String()
+		opts := parseOptions(vm, call, 2)
+		return v.doHTTPRequest(vm, method, url, opts)
+	})
+
+	return h
+}
+
+func (v *VU) doHTTPRequest(vm *goja.Runtime, method, url string, opts requestOptions) goja.Value {
+	if v.ctx == nil {
+		throw(vm, errors.New("js: http call made outside of an iteration"))
+	}
+	var body []byte
+	if opts.Body != "" {
+		body = []byte(opts.Body)
+	}
+	resp, err := v.http.Do(v.ctx, method, url, body, netapi.Options{
+		Headers:            opts.Headers,
+		InsecureSkipVerify: opts.Insecure,
+	})
+	if err != nil {
+		throw(vm, err)
+	}
+	return v.wrapHTTPResponse(vm, resp)
+}
+
+// wrapHTTPResponse turns a netapi.HTTPResponse into the JS object a
+// script works with: `{status, ok, body, headers, json()}`. body is
+// exposed as a string (scripts deal in JSON and text, not byte arrays);
+// json() parses it and throws a catchable error if it isn't valid JSON,
+// so a script can call response.json() the same way it would in a
+// browser fetch API.
+func (v *VU) wrapHTTPResponse(vm *goja.Runtime, resp *netapi.HTTPResponse) *goja.Object {
+	o := vm.NewObject()
+	_ = o.Set("status", resp.StatusCode)
+	_ = o.Set("ok", resp.StatusCode >= 200 && resp.StatusCode < 300)
+	bodyStr := string(resp.Body)
+	_ = o.Set("body", bodyStr)
+
+	headers := vm.NewObject()
+	for k := range resp.Headers {
+		_ = headers.Set(k, resp.Headers.Get(k))
+	}
+	_ = o.Set("headers", headers)
+
+	_ = o.Set("json", func(call goja.FunctionCall) goja.Value {
+		var parsed interface{}
+		if err := json.Unmarshal(resp.Body, &parsed); err != nil {
+			throw(vm, fmt.Errorf("js: response.json(): %w", err))
+		}
+		return vm.ToValue(parsed)
+	})
+
+	return o
+}
+
+// newWSGlobal builds the `ws` object: `connect(url[, options])` opens a
+// connection a script can send to and receive from repeatedly, unlike
+// internal/protocol/websocket.Driver's one-shot-per-Do behavior.
+func (v *VU) newWSGlobal(vm *goja.Runtime) *goja.Object {
+	w := vm.NewObject()
+	_ = w.Set("connect", func(call goja.FunctionCall) goja.Value {
+		if v.ctx == nil {
+			throw(vm, errors.New("js: ws.connect call made outside of an iteration"))
+		}
+		if len(call.Arguments) < 1 {
+			throw(vm, errors.New("js: ws.connect(url[, options]) requires a url argument"))
+		}
+		url := call.Arguments[0].String()
+		opts := parseOptions(vm, call, 1)
+
+		conn, err := netapi.Dial(v.ctx, v.safetyCheck, url, v.timeout, netapi.Options{
+			Headers:            opts.Headers,
+			InsecureSkipVerify: opts.Insecure,
+		})
+		if err != nil {
+			throw(vm, err)
+		}
+		v.openConns = append(v.openConns, conn)
+		return v.wrapWSConn(vm, conn)
+	})
+	return w
+}
+
+// wrapWSConn turns a netapi.WSConn into the JS object a script works
+// with: `{send(data), receive(timeoutMs), close()}`. receive returns
+// null on a clean close, so a "read frames until done" loop can check
+// for that directly, matching FR-CLI-08's own LaunchPad example.
+func (v *VU) wrapWSConn(vm *goja.Runtime, conn *netapi.WSConn) *goja.Object {
+	o := vm.NewObject()
+
+	_ = o.Set("send", func(call goja.FunctionCall) goja.Value {
+		if len(call.Arguments) < 1 {
+			throw(vm, errors.New("js: send(data) requires a data argument"))
+		}
+		data := call.Arguments[0].String()
+		if err := conn.Send(v.ctx, []byte(data), true); err != nil {
+			throw(vm, err)
+		}
+		return goja.Undefined()
+	})
+
+	_ = o.Set("receive", func(call goja.FunctionCall) goja.Value {
+		ctx := v.ctx
+		if len(call.Arguments) >= 1 && !goja.IsUndefined(call.Arguments[0]) && !goja.IsNull(call.Arguments[0]) {
+			ms := call.Arguments[0].ToInteger()
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(v.ctx, time.Duration(ms)*time.Millisecond)
+			defer cancel()
+		}
+		data, closed, err := conn.Receive(ctx)
+		if err != nil {
+			throw(vm, err)
+		}
+		if closed {
+			return goja.Null()
+		}
+		return vm.ToValue(string(data))
+	})
+
+	_ = o.Set("close", func(call goja.FunctionCall) goja.Value {
+		if err := conn.Close(); err != nil {
+			throw(vm, err)
+		}
+		return goja.Undefined()
+	})
+
+	return o
+}
+
 // Iteration runs the script's default export once. It implements
 // engine.IterationFunc's signature (func(context.Context) error)
 // directly, so a *VU can be used anywhere the engine wants one, without
 // an adapter: `executor.Run(ctx, vu.Iteration, recorder)`.
+//
+// ctx is also what every http/ws call this iteration makes uses to bound
+// and cancel itself — it's stashed on v for the native functions above
+// to read, since goja.FunctionCall gives them no way to receive it
+// directly.
 //
 // If ctx is cancelled while the function is running, Iteration
 // interrupts the runtime and returns promptly instead of waiting for a
 // runaway script to finish on its own.
 func (v *VU) Iteration(ctx context.Context) error {
 	v.vm.ClearInterrupt()
+	v.ctx = ctx
 
 	done := make(chan struct{})
 	defer close(done)
@@ -217,8 +475,13 @@ func (v *VU) Iteration(ctx context.Context) error {
 	return fmt.Errorf("js: %w", err)
 }
 
-// Close releases v's resources. A goja.Runtime needs no explicit
-// teardown, so this is a no-op; it exists so *VU satisfies the same
-// Iteration-plus-Close shape as python.VU, letting callers (such as
-// cmd/vegaload's VU pool) treat either scripting runtime the same way.
-func (v *VU) Close() error { return nil }
+// Close releases v's resources: the VU's HTTP client's idle connections
+// and every WebSocket connection it ever opened via ws.connect, even one
+// a script never explicitly closed itself.
+func (v *VU) Close() error {
+	v.http.Close()
+	for _, conn := range v.openConns {
+		_ = conn.Close()
+	}
+	return nil
+}
