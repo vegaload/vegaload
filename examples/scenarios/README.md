@@ -64,7 +64,35 @@ With the sample app's injected latency and ~3% POST failure rate, a run
 against `/widgets` (GET-only, so no failures) is a clean baseline; try it
 against `-method POST` to see `diagnose` actually have something to flag.
 
-## 3. Generate a runbook from an OpenAPI spec
+## 3. Compare a later run against the baseline
+
+Keep the baseline JSON from step 1, run again after a change, then diff:
+
+```
+vegaload run -target http://127.0.0.1:8080/widgets -protocol http1 \
+  -vus 10 -duration 30s -out candidate.json
+vegaload compare baseline.json candidate.json
+```
+
+Exit code is non-zero when error rate or p95 latency got worse (strict by
+default). Optional slack for CI noise:
+
+```
+vegaload compare -error-rate-delta 0.01 -p95-ratio 1.2 baseline.json candidate.json
+```
+
+Without running the sample app, the checked-in fixtures under
+[`compare/`](./compare/) show both outcomes:
+
+```
+# ok — candidate is no worse than baseline (exit 0)
+vegaload compare compare/baseline.json compare/candidate-ok.json
+
+# regressed — higher error rate and p95 (exit 1)
+vegaload compare compare/baseline.json compare/candidate-regressed.json
+```
+
+## 4. Generate a runbook from an OpenAPI spec
 
 `generate_from_spec` (the MCP tool) and `vegaload new -from-openapi` (the CLI
 command behind it) are the same thing -- a Markdown runbook of one
@@ -78,7 +106,7 @@ vegaload new -from-openapi ../sample-app/openapi.json sample-app
 This writes `sample-app.vegaload-plan.md` with a `vegaload run` command for
 each of `/health`, `/widgets` (GET and POST), and `/widgets/{id}`.
 
-## 4. The scripted scenario
+## 5. The scripted scenario
 
 `smoke.vl.js` is here as the "a test is a real file" example (see
 `AGENTS.md`), not a load test of the sample app -- it exercises VegaLoad's VU
@@ -91,7 +119,7 @@ vegaload run -vus 5 -duration 5s smoke.vl.js
 
 (flags before the scenario file -- see `vegaload run -h`)
 
-## 5. Do all of this from an agent instead
+## 6. Do all of this from an agent instead
 
 ```
 vegaload init
@@ -99,7 +127,7 @@ vegaload init
 
 registers this same CLI as an MCP server (and a Claude Code / Cursor skill
 bundle) for the project you run it in, so an agent can call `run_test`,
-`diagnose_failure`, `generate_from_spec`, and the rest of
+`diagnose_failure`, `compare_reports`, `generate_from_spec`, and the rest of
 [FR-MCP-03's tool set](../../AGENTS.md) directly -- each one shelling out to
 the exact commands above. See the top-level `README.md` for the full
 walkthrough.

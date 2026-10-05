@@ -1,0 +1,40 @@
+{
+  "executor": "fixed-vus",
+  "started_at": "2026-10-05T12:00:00Z",
+  "elapsed_ns": 30000000000,
+  "total": 900,
+  "failed": 45,
+  "error_rate": 0.05,
+  "latency": {
+    "min_ns": 6000000,
+    "mean_ns": 45000000,
+    "max_ns": 250000000,
+    "p50_ns": 30000000,
+    "p90_ns": 90000000,
+    "p95_ns": 120000000,
+    "p99_ns": 200000000
+  },
+  "time_series": [
+    {
+      "offset_ns": 0,
+      "requests": 300,
+      "failed": 5,
+      "rps": 300,
+      "error_rate": 0.016666666666666666
+    },
+    {
+      "offset_ns": 1000000000,
+      "requests": 300,
+      "failed": 20,
+      "rps": 300,
+      "error_rate": 0.06666666666666667
+    },
+    {
+      "offset_ns": 2000000000,
+      "requests": 300,
+      "failed": 20,
+      "rps": 300,
+      "error_rate": 0.06666666666666667
+    }
+  ]
+}

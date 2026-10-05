@@ -54,6 +54,7 @@ When in doubt about where new code belongs, put it in the smallest module that n
 - `vegaload run <file>` — run a scenario.
 - `vegaload new --from-openapi <spec>` — generate a starter scenario from an OpenAPI spec.
 - `vegaload diagnose <report>` — explain a failed run.
+- `vegaload compare <baseline.json> <candidate.json>` — diff a candidate report against a baseline; exits non-zero on regression.
 - `vegaload mcp serve` — start the MCP server (stdio by default).
 - `vegaload --move-to-harness <test-name|all>` — push a test to Harness RT.
 - `go test ./...` — run the test suite. Run this before proposing any change as finished.

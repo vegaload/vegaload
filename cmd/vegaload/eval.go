@@ -136,7 +136,7 @@ func passCount(results []eval.CaseResult) int {
 	return n
 }
 
-// writeEvalFixtures writes the two fixture files the embedded v1 suite
+// writeEvalFixtures writes the fixture files the embedded v1 suite
 // references by "${WORKDIR}"-relative path:
 //
 //   - fixture-report.json: a report.Result whose exact numbers the
@@ -144,6 +144,8 @@ func passCount(results []eval.CaseResult) int {
 //     (Total=100, Failed=0, ErrorRate=0, Latency.P95=50ms — which
 //     SuggestThresholds turns into a "60ms" latency_p95: 50ms * 1.2
 //     rounded up to the nearest 10ms).
+//   - fixture-report-worse.json: same shape with a higher error rate,
+//     for the compare_reports case that expects regressed=true.
 //   - fixture-spec.json: a one-endpoint OpenAPI document, for the
 //     generate_from_spec case that expects "endpoints": 1.
 func writeEvalFixtures(workdir string) error {
@@ -166,6 +168,14 @@ func writeEvalFixtures(workdir string) error {
 	}
 	if err := report.WriteJSON(workdir+"/fixture-report.json", res); err != nil {
 		return fmt.Errorf("fixture-report.json: %w", err)
+	}
+
+	worse := *res
+	worse.Failed = 10
+	worse.ErrorRate = 0.1
+	worse.Latency.P95 = 120 * time.Millisecond
+	if err := report.WriteJSON(workdir+"/fixture-report-worse.json", &worse); err != nil {
+		return fmt.Errorf("fixture-report-worse.json: %w", err)
 	}
 
 	const spec = `{

@@ -1,12 +1,12 @@
 ---
 name: vegaload
-description: Use VegaLoad to load-test an HTTP/gRPC/WebSocket API — create a scenario, run a load test with a fixed, ramped, or stepped VU shape, read back results, get suggested pass/fail thresholds, diagnose a run's failures, or generate a runbook from an OpenAPI spec. Use this whenever the user asks to load test, stress test, soak test, or benchmark an API's performance.
+description: Use VegaLoad to load-test an HTTP/gRPC/WebSocket API — create a scenario, run a load test with a fixed, ramped, or stepped VU shape, read back results, get suggested pass/fail thresholds, diagnose a run's failures, compare a run against a baseline, or generate a runbook from an OpenAPI spec. Use this whenever the user asks to load test, stress test, soak test, or benchmark an API's performance.
 ---
 
 # VegaLoad load testing
 
 VegaLoad is an open-source load testing tool. `vegaload init` registered its MCP
-server for this project, which exposes six tools — every one of them a thin
+server for this project, which exposes seven tools — every one of them a thin
 wrapper around the same `vegaload` CLI commands you could run yourself from a
 terminal, so nothing here does anything a human running `vegaload` by hand
 couldn't also do.
@@ -39,6 +39,9 @@ couldn't also do.
   rate, latency long tail, whether failures were transient or spread across
   the run) and, if the user has configured `VEGALOAD_LLM_PROVIDER` in this
   MCP server's environment, a plain-English narrative.
+- **compare_reports** — diff a candidate JSON report against a baseline JSON
+  report (`vegaload compare`). Returns metric deltas and whether error rate
+  or p95 latency regressed. Use after a second run to check for regressions.
 - **generate_from_spec** — given a JSON OpenAPI document, generate a runbook
   (one ready-to-run `vegaload run` command per endpoint). Only JSON specs are
   supported — ask the user to export YAML specs to JSON first.
@@ -54,7 +57,9 @@ couldn't also do.
 4. If the run had failures or looks degraded, call **diagnose_failure** on
    the report for an explanation before guessing.
 5. Once a baseline run looks healthy, call **suggest_thresholds** to propose
-   gates for future runs.
+   gates for future runs. Keep that baseline JSON path.
+6. After a later run, call **compare_reports** with the baseline and candidate
+   report paths to see whether error rate or p95 got worse.
 
 Report numbers back to the user plainly (total requests, failure rate, p95
 latency) rather than dumping the raw JSON, and mention the HTML report path

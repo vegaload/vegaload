@@ -128,7 +128,26 @@ export VEGALOAD_LLM_API_KEY=sk-...
 Nothing about a run or its results leaves your machine unless you configure
 this yourself (`-no-llm` skips narration even if it's configured).
 
-### 4. Hand all of this to an agent
+### 4. Compare a later run against the baseline
+
+After another run with `-out candidate.json`:
+
+```
+./vegaload compare baseline.json candidate.json
+```
+
+Prints deltas (error rate, latency percentiles, totals, overall RPS) and
+exits non-zero if error rate or p95 latency got worse. Optional slack:
+
+```
+./vegaload compare -error-rate-delta 0.01 -p95-ratio 1.2 \
+  baseline.json candidate.json
+```
+
+Checked-in fixtures under `examples/scenarios/compare/` show both an ok and
+a regressed pair without needing a live target.
+
+### 5. Hand all of this to an agent
 
 ```
 ./vegaload init
@@ -139,14 +158,14 @@ present: a Claude Code skill bundle (`.claude/skills/vegaload`), a Cursor
 rules file (`.cursor/rules/vegaload.mdc`), and an MCP server entry merged
 into both `.mcp.json` and `.cursor/mcp.json`, pointing at this same compiled
 binary running `vegaload mcp serve`. Open the project in Claude Code or
-Cursor afterward and the agent has six tools — `create_scenario`,
+Cursor afterward and the agent has seven tools — `create_scenario`,
 `run_test`, `get_results`, `suggest_thresholds`, `diagnose_failure`,
-`generate_from_spec` — each one calling the exact CLI command shown above
-and parsing its `-output json` result; there is no agent-only path that
-skips the CLI.
+`compare_reports`, `generate_from_spec` — each one calling the exact CLI
+command shown above and parsing its `-output json` result; there is no
+agent-only path that skips the CLI.
 
 `vegaload mcp eval` runs a versioned, non-LLM suite of {tool call, expected
-outcome} cases against those same six tools directly — the thing to run in
+outcome} cases against those same tools directly — the thing to run in
 CI after upgrading, to check the tool layer itself still behaves, independent
 of any model's tool-picking behavior:
 

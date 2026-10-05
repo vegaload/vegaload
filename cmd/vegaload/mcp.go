@@ -41,7 +41,7 @@ func cmdMCPServe(args []string) int {
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "Usage: vegaload mcp serve")
 		fmt.Fprintln(fs.Output(), "Runs an MCP server over stdio, exposing VegaLoad's CLI commands as tools")
-		fmt.Fprintln(fs.Output(), "(create_scenario, run_test, get_results, suggest_thresholds, diagnose_failure)")
+		fmt.Fprintln(fs.Output(), "(create_scenario, run_test, get_results, suggest_thresholds, diagnose_failure, compare_reports, generate_from_spec)")
 		fmt.Fprintln(fs.Output(), "for an MCP-aware agent (Claude Code, Cursor, etc.) to call directly.")
 	}
 	if err := fs.Parse(args); err != nil {
