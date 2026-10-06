@@ -43,6 +43,15 @@
       "expect_contains": {"report_path": "${WORKDIR}/fixture-report.json"}
     },
     {
+      "name": "compare_reports flags a worse candidate against the baseline fixture",
+      "tool": "compare_reports",
+      "arguments": {
+        "baseline_path": "${WORKDIR}/fixture-report.json",
+        "candidate_path": "${WORKDIR}/fixture-report-worse.json"
+      },
+      "expect_contains": {"regressed": true}
+    },
+    {
       "name": "generate_from_spec requires spec_path",
       "tool": "generate_from_spec",
       "arguments": {},

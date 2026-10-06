@@ -23,6 +23,7 @@ func NewTools(exePath string) []Tool {
 		getResultsTool(),
 		suggestThresholdsTool(exePath),
 		diagnoseFailureTool(exePath),
+		compareReportsTool(exePath),
 		generateFromSpecTool(exePath),
 	}
 }
@@ -319,6 +320,64 @@ func diagnoseFailureTool(exePath string) Tool {
 			var result map[string]any
 			if err := json.Unmarshal(stdout, &result); err != nil {
 				return nil, fmt.Errorf("parsing `vegaload diagnose` output: %w", err)
+			}
+			return result, nil
+		},
+	}
+}
+
+// --- compare_reports : wraps `vegaload compare <baseline> <candidate>` ---
+
+type compareReportsArgs struct {
+	BaselinePath   string   `json:"baseline_path"`
+	CandidatePath  string   `json:"candidate_path"`
+	ErrorRateDelta *float64 `json:"error_rate_delta,omitempty"`
+	P95Ratio       *float64 `json:"p95_ratio,omitempty"`
+}
+
+func compareReportsTool(exePath string) Tool {
+	return Tool{
+		Name: "compare_reports",
+		Description: "Diff a candidate JSON report against a baseline JSON report (both from " +
+			"`vegaload run -out` / run_test). Returns metric deltas and whether error rate or p95 " +
+			"latency regressed. Equivalent to `vegaload compare <baseline.json> <candidate.json>`.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"baseline_path":    map[string]any{"type": "string", "description": "path to the baseline vegaload JSON report"},
+				"candidate_path":   map[string]any{"type": "string", "description": "path to the candidate vegaload JSON report"},
+				"error_rate_delta": map[string]any{"type": "number", "description": "absolute error-rate slack before counting as a regression (0.01 = one percentage point)"},
+				"p95_ratio":        map[string]any{"type": "number", "description": "max allowed candidate/baseline p95 ratio (1.2 allows 20% headroom)"},
+			},
+			"required": []string{"baseline_path", "candidate_path"},
+		},
+		Handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
+			var in compareReportsArgs
+			if err := json.Unmarshal(raw, &in); err != nil {
+				return nil, fmt.Errorf("invalid arguments: %w", err)
+			}
+			if in.BaselinePath == "" || in.CandidatePath == "" {
+				return nil, fmt.Errorf("baseline_path and candidate_path are required")
+			}
+			args := []string{"compare", "-output", "json"}
+			if in.ErrorRateDelta != nil {
+				args = append(args, "-error-rate-delta", strconv.FormatFloat(*in.ErrorRateDelta, 'f', -1, 64))
+			}
+			if in.P95Ratio != nil {
+				args = append(args, "-p95-ratio", strconv.FormatFloat(*in.P95Ratio, 'f', -1, 64))
+			}
+			args = append(args, in.BaselinePath, in.CandidatePath)
+			stdout, err := RunCLI(ctx, exePath, args...)
+			// Exit 1 with a parseable compare Result means "regressed",
+			// not a tool failure — return the structured result either way.
+			var result map[string]any
+			if uerr := json.Unmarshal(stdout, &result); uerr == nil {
+				if _, ok := result["regressed"]; ok {
+					return result, nil
+				}
+			}
+			if err != nil {
+				return nil, err
 			}
 			return result, nil
 		},

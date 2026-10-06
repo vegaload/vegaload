@@ -68,7 +68,7 @@ func TestWriteEvalFixtures(t *testing.T) {
 	if err := writeEvalFixtures(dir); err != nil {
 		t.Fatalf("writeEvalFixtures: %v", err)
 	}
-	for _, name := range []string{"fixture-report.json", "fixture-spec.json"} {
+	for _, name := range []string{"fixture-report.json", "fixture-report-worse.json", "fixture-spec.json"} {
 		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
 			t.Errorf("expected %s to exist: %v", name, err)
 		}

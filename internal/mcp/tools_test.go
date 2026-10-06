@@ -228,6 +228,58 @@ func TestDiagnoseFailureTool_NoLLMFlag(t *testing.T) {
 	}
 }
 
+func TestCompareReportsTool_BuildsArgs(t *testing.T) {
+	stdout := `{"baseline_path":"b.json","candidate_path":"c.json","regressed":false,"metrics":[],"notes":["no regressions against the baseline"]}`
+	bin, argsFile := argRecordingBinary(t, stdout, 0)
+	tools := NewTools(bin)
+
+	out, err := callTool(t, tools, "compare_reports", map[string]any{
+		"baseline_path":    "b.json",
+		"candidate_path":   "c.json",
+		"error_rate_delta": 0.01,
+		"p95_ratio":        1.2,
+	})
+	if err != nil {
+		t.Fatalf("compare_reports returned error: %v", err)
+	}
+	m := out.(map[string]any)
+	if m["regressed"] != false {
+		t.Errorf("regressed = %v, want false", m["regressed"])
+	}
+	args := readArgs(t, argsFile)
+	if args[0] != "compare" || !containsArg(args, "-output") || !containsArg(args, "b.json") || !containsArg(args, "c.json") {
+		t.Errorf("args = %v, want compare -output json ... b.json c.json", args)
+	}
+	if !containsArg(args, "-error-rate-delta") || !containsArg(args, "-p95-ratio") {
+		t.Errorf("expected slack flags in args: %v", args)
+	}
+}
+
+func TestCompareReportsTool_RegressionExitStillReturnsResult(t *testing.T) {
+	stdout := `{"baseline_path":"b.json","candidate_path":"c.json","regressed":true,"metrics":[],"notes":["error rate rose"]}`
+	bin, _ := argRecordingBinary(t, stdout, 1)
+	tools := NewTools(bin)
+
+	out, err := callTool(t, tools, "compare_reports", map[string]any{
+		"baseline_path":  "b.json",
+		"candidate_path": "c.json",
+	})
+	if err != nil {
+		t.Fatalf("compare_reports should return structured result on regression exit, got error: %v", err)
+	}
+	m := out.(map[string]any)
+	if m["regressed"] != true {
+		t.Errorf("regressed = %v, want true", m["regressed"])
+	}
+}
+
+func TestCompareReportsTool_RequiresPaths(t *testing.T) {
+	tools := NewTools("/unused")
+	if _, err := callTool(t, tools, "compare_reports", map[string]any{}); err == nil {
+		t.Error("expected an error when paths are missing")
+	}
+}
+
 func TestGenerateFromSpecTool_BuildsArgs(t *testing.T) {
 	stdout := `{"path":"widgets.vegaload-plan.md","created":true,"endpoints":3}`
 	bin, argsFile := argRecordingBinary(t, stdout, 0)
