@@ -22,7 +22,7 @@ out of scope for now.
 
 ## Install
 
-With Homebrew (macOS and Linux):
+With Homebrew (macOS and Linux), after the first tagged GitHub release:
 
 ```
 brew install vegaload/tap/vegaload
@@ -30,7 +30,8 @@ vegaload version
 ```
 
 `brew tap vegaload/tap` followed by `brew install vegaload` does the same
-thing. Upgrade with `brew upgrade vegaload`.
+thing. Upgrade with `brew upgrade vegaload`. Until a tag exists, build from
+source below.
 
 Or build from source (Go 1.22+):
 

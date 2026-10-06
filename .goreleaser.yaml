@@ -71,4 +71,4 @@ brews:
       email: bot@vegaload.dev
     commit_msg_template: "vegaload {{ .Tag }}"
     test: |
-      assert_match "vegaload", shell_output("#{bin}/vegaload version")
+      assert_match "vegaload #{version}", shell_output("#{bin}/vegaload version")

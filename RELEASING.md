@@ -27,6 +27,9 @@ git tag -a v0.1.0 -m "v0.1.0"
 git push origin v0.1.0
 ```
 
+The workflow only runs for tags matching `v[0-9]*` (for example `v0.1.0`),
+not a stray `vfoo` tag.
+
 Watch the Release run in the Actions tab. When it is green:
 
 ```
