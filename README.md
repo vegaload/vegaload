@@ -256,6 +256,49 @@ protocol-direct commands from an OpenAPI spec:
 writes `sample-app.vegaload-plan.md`: one ready-to-run `vegaload run`
 command per endpoint the spec declares.
 
+### Start from a browser recording
+
+Record a real session in your browser (the network tab can save it as a
+HAR file), then turn it into a scenario:
+
+```
+./vegaload import har recording.har -o checkout.vl.js
+./vegaload validate -secret-env VL_COOKIE checkout.vl.js
+```
+
+The importer makes a first draft, and you edit it. It keeps the real calls,
+in the order they were recorded, one `http` call each, with a check on the
+status the browser got. It leaves out images, fonts, style sheets and
+scripts, requests to other sites (analytics, ads, CDNs), CORS preflight
+requests, and requests that failed. "Other sites" means sites other than the
+one of the first page you opened in the recording. Use `-include-static`,
+`-include-third-party` or `-host` to change that, and `-max N` to stop after
+N requests.
+
+The importer keeps the secrets it can recognise out of the file. A `Cookie`
+or `Authorization` header, any header, query parameter or body field whose
+name looks secret (password, token, api key, session, csrf and similar), and
+any value that is a JWT, is read from the environment as `env.VL_NAME`. The
+file lists the variables, and you pass each one by name with `-secret-env`.
+It works on names and on the shape of a JWT, so a secret with an ordinary
+name stays as it was recorded: a token in a path such as `/reset/<token>`, a
+query parameter named `code`, or a field named `key`. Read the file before
+you share it, and do not commit the HAR file. The importer also drops headers a client
+sets by itself (`User-Agent`, `Content-Length`, `Referer`, `Origin`, `Sec-*`
+and similar).
+
+Some things are left for you, and the file marks them with `TODO` lines:
+
+- A value that looks like it changes on every run (a UUID, a long number, a
+  token). When the same value was in the answer to an earlier request, the
+  note says which request, so you can carry it forward with `r2.json()`.
+- A multipart body. It is left out.
+- Waits between requests, and cookies that an answer sets. A scenario has no
+  sleep and no cookie jar, so pass the `Cookie` header as a secret.
+
+The hosts in the file are real. A host that is not localhost needs
+`-allow-target` on the run, and the file's first lines say which.
+
 ### Check a scenario before a real run
 
 ```
@@ -548,6 +591,7 @@ this same walkthrough as a standalone, copy-pasteable script.
 | `vegaload run`           | Run a load test: a scenario file, or a protocol-direct target         |
 | `vegaload validate`      | Run a scenario once, with one user, to check that it works            |
 | `vegaload new`           | Scaffold a starter scenario file, or a runbook from an OpenAPI spec    |
+| `vegaload import har`    | Make a scenario file from a browser recording (a HAR file)             |
 | `vegaload diagnose`      | Print environment info, or explain a report's results                |
 | `vegaload mcp serve`     | Run an MCP server over stdio (or `-http addr`) for agent-native use   |
 | `vegaload mcp eval`      | Run the versioned MCP tool-calling eval suite against this binary     |
