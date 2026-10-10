@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/vegaload/vegaload/internal/safety"
+	"github.com/vegaload/vegaload/internal/urlerr"
 )
 
 type target struct {
@@ -65,10 +66,10 @@ func parseTarget(raw string) (target, error) {
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
-		return target{}, fmt.Errorf("parsing %q: %w", raw, err)
+		return target{}, fmt.Errorf("parsing %q: %w", urlerr.Mask(raw), urlerr.Inner(err))
 	}
 	if u.Hostname() == "" {
-		return target{}, fmt.Errorf("%q has no host", raw)
+		return target{}, fmt.Errorf("%q has no host", urlerr.Mask(raw))
 	}
 	t := target{Scheme: strings.ToLower(u.Scheme), Host: u.Hostname(), Port: u.Port()}
 	if t.Port == "" {

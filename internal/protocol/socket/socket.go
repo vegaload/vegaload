@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/vegaload/vegaload/internal/protocol"
+	"github.com/vegaload/vegaload/internal/urlerr"
 )
 
 const (
@@ -85,7 +86,7 @@ func newDriver(network string, target protocol.Target, timeout time.Duration) (*
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
-		return nil, fmt.Errorf("%s: parsing target: %w", network, err)
+		return nil, fmt.Errorf("%s: parsing target: %w", network, urlerr.Inner(err))
 	}
 	if u.Scheme != network {
 		return nil, fmt.Errorf("%s: unsupported scheme %q, want %s:// or host:port", network, u.Scheme, network)

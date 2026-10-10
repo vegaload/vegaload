@@ -72,6 +72,7 @@ import (
 	"github.com/twmb/franz-go/pkg/sasl/scram"
 
 	"github.com/vegaload/vegaload/internal/protocol"
+	"github.com/vegaload/vegaload/internal/urlerr"
 )
 
 // Options are the -opt keys this driver accepts. The command's protocol
@@ -175,7 +176,7 @@ func build(target protocol.Target, timeout time.Duration, password *string, conn
 
 	u, err := url.Parse(target.URL)
 	if err != nil {
-		return nil, fmt.Errorf("kafka: parsing target URL: %w", err)
+		return nil, fmt.Errorf("kafka: parsing target URL: %w", urlerr.Inner(err))
 	}
 	port := u.Port()
 	useTLS := false

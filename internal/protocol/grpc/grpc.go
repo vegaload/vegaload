@@ -26,6 +26,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/vegaload/vegaload/internal/protocol"
+	"github.com/vegaload/vegaload/internal/urlerr"
 )
 
 // rawCodec marshals and unmarshals gRPC messages as plain []byte, with no
@@ -118,7 +119,7 @@ func parseAddr(target string, insecureSkipVerify bool) (addr string, creds crede
 
 	u, err := url.Parse(target)
 	if err != nil {
-		return "", nil, fmt.Errorf("parsing target: %w", err)
+		return "", nil, fmt.Errorf("parsing target: %w", urlerr.Inner(err))
 	}
 
 	switch u.Scheme {

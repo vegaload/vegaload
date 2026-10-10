@@ -7,15 +7,13 @@ import (
 	"strings"
 
 	"github.com/vegaload/vegaload/internal/protocol/xfercommon"
+	"github.com/vegaload/vegaload/internal/urlerr"
 )
 
 func (d *Driver) parseURL() error {
 	u, err := url.Parse(d.target.URL)
 	if err != nil {
-		if ue, ok := err.(*url.Error); ok && ue.Err != nil {
-			err = ue.Err
-		}
-		return fmt.Errorf("ftp: parsing target URL: %v", err)
+		return fmt.Errorf("ftp: parsing target URL: %v", urlerr.Inner(err))
 	}
 	switch strings.ToLower(u.Scheme) {
 	case "ftp":

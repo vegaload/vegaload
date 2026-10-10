@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/vegaload/vegaload/internal/urlerr"
 )
 
 // Limits are the hard caps enforced on every run, regardless of target.
@@ -82,11 +84,11 @@ func TargetHost(raw string) (string, error) {
 
 	u, err := url.Parse(candidate)
 	if err != nil {
-		return "", fmt.Errorf("safety: parsing target %q: %w", raw, err)
+		return "", fmt.Errorf("safety: parsing target %q: %w", urlerr.Mask(raw), urlerr.Inner(err))
 	}
 	host := u.Hostname()
 	if host == "" {
-		return "", fmt.Errorf("safety: target %q has no host", raw)
+		return "", fmt.Errorf("safety: target %q has no host", urlerr.Mask(raw))
 	}
 	return host, nil
 }

@@ -21,6 +21,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/vegaload/vegaload/internal/protocol"
+	"github.com/vegaload/vegaload/internal/urlerr"
 )
 
 // Driver is a WebSocket protocol.Protocol.
@@ -39,7 +40,7 @@ type Driver struct {
 func New(target protocol.Target, timeout time.Duration) (*Driver, error) {
 	u, err := url.Parse(target.URL)
 	if err != nil {
-		return nil, fmt.Errorf("websocket: parsing target URL: %w", err)
+		return nil, fmt.Errorf("websocket: parsing target URL: %w", urlerr.Inner(err))
 	}
 	if u.Scheme != "ws" && u.Scheme != "wss" {
 		return nil, fmt.Errorf("websocket: unsupported scheme %q, want ws:// or wss://", u.Scheme)

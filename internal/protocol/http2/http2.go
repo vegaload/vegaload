@@ -24,6 +24,7 @@ import (
 	"golang.org/x/net/http2"
 
 	"github.com/vegaload/vegaload/internal/protocol"
+	"github.com/vegaload/vegaload/internal/urlerr"
 )
 
 // Driver is an HTTP/2 protocol.Protocol.
@@ -40,7 +41,7 @@ type Driver struct {
 func New(target protocol.Target, timeout time.Duration) (*Driver, error) {
 	u, err := url.Parse(target.URL)
 	if err != nil {
-		return nil, fmt.Errorf("http2: parsing target URL: %w", err)
+		return nil, fmt.Errorf("http2: parsing target URL: %w", urlerr.Inner(err))
 	}
 
 	transport := &http2.Transport{
