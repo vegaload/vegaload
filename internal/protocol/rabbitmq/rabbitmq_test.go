@@ -364,7 +364,7 @@ func TestRoundtrip_TopicDefaultAndLeaks(t *testing.T) {
 		res, rep := c.Run(context.Background())
 		if want == "" {
 			if !res.Success {
-				t.Fatalf("roundtrip %d: %v", i, res.Err)
+				t.Fatalf("roundtrip %d: %v (connection close: %q)", i, res.Err, parent.link.closeReason())
 			}
 			for _, m := range rep.Messages {
 				if m.Body == "nope" || m.MessageID == "foreign-id" {
@@ -374,7 +374,7 @@ func TestRoundtrip_TopicDefaultAndLeaks(t *testing.T) {
 			continue
 		}
 		if res.Success || !strings.Contains(res.Err.Error(), want) {
-			t.Fatalf("roundtrip %d: %v", i, res.Err)
+			t.Fatalf("roundtrip %d: %v (connection close: %q)", i, res.Err, parent.link.closeReason())
 		}
 	}
 	select {
@@ -387,6 +387,109 @@ func TestRoundtrip_TopicDefaultAndLeaks(t *testing.T) {
 	}
 	if q := s.Queues(); len(q) != 0 {
 		t.Fatalf("leftover queues %v", q)
+	}
+}
+
+// TestRun_WaitsForTheWatchdogBeforeTheNextCall is the timeout in
+// TestRoundtrip_TopicDefaultAndLeaks. That call returns as soon as its
+// budget ends, while the watchdog may still be closing the shared
+// connection. The next call then fails with "channel/connection is not
+// open". Run has to wait until the watchdog finishes.
+func TestRun_WaitsForTheWatchdogBeforeTheNextCall(t *testing.T) {
+	s := rabbitmqtest.Start(t)
+	if err := declareSink(t, s); err != nil {
+		t.Fatal(err)
+	}
+	parent, err := NewConn(protocol.Target{URL: s.URL()}, 2*time.Second, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = parent.Close() })
+
+	warm, err := parent.Call(map[string]string{"mode": "roundtrip"}, []byte("ping-{id}"), 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res, _ := warm.Run(context.Background()); !res.Success {
+		t.Fatal(res.Err)
+	}
+
+	holdCh := make(chan struct{})
+	holdConn := make(chan struct{})
+	entered := make(chan struct{})
+	closeCallMu.Lock()
+	origCh, origConn := closeCallChannel, closeCallConn
+	closeCallChannel = func(ch *amqp.Channel) error {
+		<-holdCh
+		return origCh(ch)
+	}
+	closeCallConn = func(c *amqp.Connection) error {
+		close(entered)
+		<-holdConn
+		return origConn(c)
+	}
+	closeCallMu.Unlock()
+	var releaseCh, releaseConn sync.Once
+	release := func() {
+		releaseCh.Do(func() { close(holdCh) })
+		releaseConn.Do(func() { close(holdConn) })
+	}
+	t.Cleanup(func() {
+		release()
+		closeCallMu.Lock()
+		closeCallChannel, closeCallConn = origCh, origConn
+		closeCallMu.Unlock()
+	})
+
+	first, err := parent.Call(map[string]string{
+		"mode": "roundtrip", "exchange": "amq.topic",
+		"routing_key": "lost.x", "bind_key": "mine.*",
+	}, []byte("ping-{id}"), 200*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstDone := make(chan protocol.Result, 1)
+	go func() {
+		res, _ := first.Run(context.Background())
+		firstDone <- res
+	}()
+
+	select {
+	case <-entered:
+	case res := <-firstDone:
+		t.Fatalf("call returned before the watchdog closed the connection: %v (connection close: %q)", res.Err, parent.link.closeReason())
+	case <-time.After(5 * time.Second):
+		t.Fatal("watchdog did not close the connection")
+	}
+	select {
+	case res := <-firstDone:
+		t.Fatalf("Run returned while the watchdog was still closing the connection: %v (connection close: %q)", res.Err, parent.link.closeReason())
+	default:
+	}
+
+	releaseConn.Do(func() { close(holdConn) })
+	var res protocol.Result
+	select {
+	case res = <-firstDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after the watchdog finished")
+	}
+	if res.Success || !strings.Contains(res.Err.Error(), "timed out") {
+		t.Fatalf("timed out call: %v (connection close: %q)", res.Err, parent.link.closeReason())
+	}
+	conns := s.ConnCount()
+	releaseCh.Do(func() { close(holdCh) })
+
+	next, err := parent.Call(map[string]string{"mode": "roundtrip"}, []byte("ping-{id}"), 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, _ = next.Run(context.Background())
+	if !res.Success {
+		t.Fatalf("next call: %v (connection close: %q)", res.Err, parent.link.closeReason())
+	}
+	if s.ConnCount() <= conns {
+		t.Fatalf("next call reused the connection the watchdog closed (%d)", s.ConnCount())
 	}
 }
 

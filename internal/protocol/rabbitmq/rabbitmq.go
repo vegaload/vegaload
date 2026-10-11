@@ -10,7 +10,9 @@
 //
 // The client library's methods wait for the broker with no deadline of their
 // own. Each call starts a watchdog that closes the channel when the budget
-// ends, and closes the connection if that close does not finish.
+// ends, and closes the connection if that close does not finish. Run waits
+// for that watchdog before it returns. The next call on the shared connection
+// would otherwise meet a close that is still in progress.
 //
 // Publishing is allowed without a flag, the same as the other message
 // brokers. Consuming with ack=ack, and the admin actions that change the
@@ -260,34 +262,15 @@ func (d *Driver) Run(parent context.Context) (protocol.Result, Reply) {
 
 	var cur atomic.Pointer[amqp.Channel]
 	var held atomic.Pointer[amqp.Connection]
+	// AfterFunc's stop does not wait for the callback. finished is closed
+	// when the callback returns, and exec waits on it when stop returns false.
+	finished := make(chan struct{})
 	stop := context.AfterFunc(ctx, func() {
-		ch := cur.Load()
-		c := held.Load()
-		// channel.open and confirm.select run before this call has a channel
-		// to close. Those calls block with no deadline of their own, so the
-		// connection has to be closed at once.
-		if ch == nil {
-			if c != nil && !c.IsClosed() {
-				_ = c.CloseDeadline(time.Now().Add(time.Second))
-			}
-			return
-		}
-		done := make(chan struct{})
-		go func() {
-			defer close(done)
-			_ = ch.Close()
-		}()
-		select {
-		case <-done:
-		case <-time.After(time.Second):
-			if c != nil && !c.IsClosed() {
-				_ = c.CloseDeadline(time.Now().Add(time.Second))
-			}
-		}
+		defer close(finished)
+		d.closeCall(cur.Load(), held.Load())
 	})
-	defer stop()
 
-	sent, got, rep, err := d.exec(ctx, &cur, &held)
+	sent, got, rep, err := d.exec(ctx, &cur, &held, stop, finished)
 	if err != nil {
 		return protocol.Result{BytesSent: sent, BytesReceived: got, Err: d.explain(parent, ctx, err)}, rep
 	}
@@ -308,13 +291,79 @@ func (l leash) use(ch *amqp.Channel, conn *amqp.Connection) {
 	}
 }
 
-func (d *Driver) exec(ctx context.Context, cur *atomic.Pointer[amqp.Channel], held *atomic.Pointer[amqp.Connection]) (sent, got int64, rep Reply, err error) {
+// closeCallChannel and closeCallConn are the closes the watchdog uses.
+// Tests replace them, while holding closeCallMu, to hold a close open.
+var closeCallMu sync.Mutex
+var closeCallChannel = func(ch *amqp.Channel) error { return ch.Close() }
+var closeCallConn = func(c *amqp.Connection) error {
+	return c.CloseDeadline(time.Now().Add(time.Second))
+}
+
+func invokeCloseChannel(ch *amqp.Channel) error {
+	closeCallMu.Lock()
+	fn := closeCallChannel
+	closeCallMu.Unlock()
+	return fn(ch)
+}
+
+func invokeCloseConn(c *amqp.Connection) error {
+	closeCallMu.Lock()
+	fn := closeCallConn
+	closeCallMu.Unlock()
+	return fn(c)
+}
+
+// closeCall unblocks a library call that has no deadline of its own.
+// channel.open and confirm.select run before this call has a channel to
+// close, so those calls close the connection at once. A channel close that
+// is still going after a second closes the connection too.
+func (d *Driver) closeCall(ch *amqp.Channel, c *amqp.Connection) {
+	if ch == nil {
+		d.dropLink(c, "closed by the call watchdog before a channel was open")
+		return
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = invokeCloseChannel(ch)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		d.dropLink(c, "closed by the call watchdog because the channel close did not finish")
+	}
+}
+
+func (d *Driver) dropLink(c *amqp.Connection, reason string) {
+	if c == nil {
+		return
+	}
+	if d.link != nil {
+		d.link.retire(c, reason)
+	}
+	if !c.IsClosed() {
+		_ = invokeCloseConn(c)
+	}
+}
+
+func waitWatch(stop func() bool, finished <-chan struct{}) {
+	if !stop() {
+		<-finished
+	}
+}
+
+func (d *Driver) exec(ctx context.Context, cur *atomic.Pointer[amqp.Channel], held *atomic.Pointer[amqp.Connection], stop func() bool, finished <-chan struct{}) (sent, got int64, rep Reply, err error) {
 	if !d.perCall {
 		if err = d.link.take(ctx); err != nil {
+			waitWatch(stop, finished)
 			return 0, 0, Reply{}, err
 		}
 		defer d.link.give()
 	}
+	// Run does not return until the watchdog has finished, and this call
+	// keeps its slot until then. The next call cannot start on a connection
+	// this watchdog is still closing.
+	defer waitWatch(stop, finished)
 	l := leash{ch: cur, conn: held}
 	id := d.link.salt + "-" + strconv.FormatUint(d.link.seq.Add(1), 10)
 	switch d.mode {
@@ -392,6 +441,21 @@ func (l *link) closeReason() string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.lastClose
+}
+
+// retire forgets c if it is the shared connection, and records why it is
+// closing. The next call dials again instead of using a connection whose
+// close is still in progress.
+func (l *link) retire(c *amqp.Connection, reason string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if reason != "" {
+		l.lastClose = reason
+	}
+	if l.conn == c {
+		l.conn = nil
+		l.idle = nil
+	}
 }
 
 func (d *Driver) connection(ctx context.Context) (*amqp.Connection, bool, error) {
