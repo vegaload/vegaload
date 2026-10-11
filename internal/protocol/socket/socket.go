@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/vegaload/vegaload/internal/protocol"
+	"github.com/vegaload/vegaload/internal/urlerr"
 )
 
 const (
@@ -85,13 +86,13 @@ func newDriver(network string, target protocol.Target, timeout time.Duration) (*
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
-		return nil, fmt.Errorf("%s: parsing target: %w", network, err)
+		return nil, fmt.Errorf("%s: parsing target: %w", network, urlerr.Inner(err))
 	}
 	if u.Scheme != network {
 		return nil, fmt.Errorf("%s: unsupported scheme %q, want %s:// or host:port", network, u.Scheme, network)
 	}
 	if u.Hostname() == "" || u.Port() == "" {
-		return nil, fmt.Errorf("%s: target %q needs a host and a port, such as %s://localhost:9000", network, target.URL, network)
+		return nil, fmt.Errorf("%s: target %q needs a host and a port, such as %s://localhost:9000", network, urlerr.Mask(target.URL), network)
 	}
 	d.host = u.Hostname()
 	d.addr = net.JoinHostPort(u.Hostname(), u.Port())

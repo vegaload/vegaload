@@ -57,6 +57,7 @@ import (
 	paho "github.com/eclipse/paho.mqtt.golang"
 
 	"github.com/vegaload/vegaload/internal/protocol"
+	"github.com/vegaload/vegaload/internal/urlerr"
 )
 
 // Options are the -opt keys this driver accepts. The command's protocol
@@ -117,7 +118,7 @@ func newDriver(target protocol.Target, timeout time.Duration, password *string) 
 
 	u, err := url.Parse(target.URL)
 	if err != nil {
-		return nil, fmt.Errorf("mqtt: parsing target URL: %w", err)
+		return nil, fmt.Errorf("mqtt: parsing target URL: %w", urlerr.Inner(err))
 	}
 	port := u.Port()
 	switch u.Scheme {
@@ -135,7 +136,7 @@ func newDriver(target protocol.Target, timeout time.Duration, password *string) 
 		return nil, fmt.Errorf("mqtt: unsupported scheme %q, want mqtt:// or mqtts://", u.Scheme)
 	}
 	if u.Hostname() == "" {
-		return nil, fmt.Errorf("mqtt: target %q has no host", target.URL)
+		return nil, fmt.Errorf("mqtt: target %q has no host", urlerr.Mask(target.URL))
 	}
 
 	if err := target.RejectUnknownOptions(Options...); err != nil {

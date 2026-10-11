@@ -78,6 +78,7 @@ import (
 
 	"github.com/vegaload/vegaload/internal/protocol"
 	"github.com/vegaload/vegaload/internal/protocol/sqlcommon"
+	"github.com/vegaload/vegaload/internal/urlerr"
 )
 
 // Options are the -opt keys this driver accepts. The command's protocol
@@ -208,7 +209,7 @@ func build(target protocol.Target, timeout time.Duration, password *string, conn
 
 	u, err := url.Parse(target.URL)
 	if err != nil {
-		return nil, fmt.Errorf("mysql: parsing target URL: %w", err)
+		return nil, fmt.Errorf("mysql: parsing target URL: %w", urlerr.Inner(err))
 	}
 	if u.Scheme != "mysql" && u.Scheme != "mariadb" {
 		return nil, fmt.Errorf("mysql: unsupported scheme %q, want mysql://", u.Scheme)

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/vegaload/vegaload/internal/protocol"
+	"github.com/vegaload/vegaload/internal/urlerr"
 )
 
 // Driver is an HTTP/1.1 protocol.Protocol. It reuses one *http.Client
@@ -72,7 +73,7 @@ func (d *Driver) Do(ctx context.Context) (protocol.Result, error) {
 		// method) is a configuration problem, not a per-request
 		// failure — it will fail identically on every iteration, so
 		// stop the run instead of recording the same error forever.
-		return protocol.Result{}, fmt.Errorf("http1: %w", err)
+		return protocol.Result{}, fmt.Errorf("http1: %w", urlerr.Inner(err))
 	}
 	for k, v := range d.target.Headers {
 		req.Header.Set(k, v)

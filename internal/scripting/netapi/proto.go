@@ -23,6 +23,7 @@ import (
 	"github.com/vegaload/vegaload/internal/protocol/rabbitmq"
 	"github.com/vegaload/vegaload/internal/protocol/redis"
 	"github.com/vegaload/vegaload/internal/protocol/socket"
+	"github.com/vegaload/vegaload/internal/urlerr"
 )
 
 // defaultProtoTimeout is used when the caller gives no timeout at all.
@@ -1182,10 +1183,10 @@ func (c *ProtoClient) checkTarget(rawURL, scheme string) error {
 	}
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return fmt.Errorf("%s: parsing url: %w", scheme, err)
+		return fmt.Errorf("%s: parsing url: %w", scheme, urlerr.Inner(err))
 	}
 	if u.Hostname() == "" {
-		return fmt.Errorf("%s: url %q has no host", scheme, rawURL)
+		return fmt.Errorf("%s: url %q has no host", scheme, urlerr.Mask(rawURL))
 	}
 	return c.check(u.Hostname())
 }

@@ -10,17 +10,14 @@ import (
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
+
+	"github.com/vegaload/vegaload/internal/urlerr"
 )
 
 func (d *Driver) parseURL() error {
 	u, err := url.Parse(d.target.URL)
 	if err != nil {
-		// url.Error repeats the whole URL, password included. Keep the
-		// inner error only.
-		if ue, ok := err.(*url.Error); ok && ue.Err != nil {
-			err = ue.Err
-		}
-		return fmt.Errorf("rabbitmq: parsing target URL: %v", err)
+		return fmt.Errorf("rabbitmq: parsing target URL: %v", urlerr.Inner(err))
 	}
 	switch u.Scheme {
 	case "amqp":

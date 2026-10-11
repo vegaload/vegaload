@@ -31,6 +31,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"github.com/vegaload/vegaload/internal/urlerr"
 )
 
 // RunEnded reports whether the run is over: ctx is done, or its deadline
@@ -252,7 +254,7 @@ func Dial(ctx context.Context, check SafetyCheck, rawURL string, timeout time.Du
 		if resp != nil {
 			resp.Body.Close()
 		}
-		return nil, fmt.Errorf("netapi: dialing %s: %w", rawURL, err)
+		return nil, fmt.Errorf("netapi: dialing %s: %w", urlerr.Mask(rawURL), urlerr.Inner(err))
 	}
 	return &WSConn{conn: conn}, nil
 }
@@ -332,11 +334,11 @@ func checkHost(check SafetyCheck, rawURL string) error {
 	}
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return fmt.Errorf("netapi: parsing URL %q: %w", rawURL, err)
+		return fmt.Errorf("netapi: parsing URL %q: %w", urlerr.Mask(rawURL), urlerr.Inner(err))
 	}
 	host := u.Hostname()
 	if host == "" {
-		return fmt.Errorf("netapi: URL %q has no host", rawURL)
+		return fmt.Errorf("netapi: URL %q has no host", urlerr.Mask(rawURL))
 	}
 	return check(host)
 }

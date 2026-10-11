@@ -74,6 +74,7 @@ import (
 
 	"github.com/vegaload/vegaload/internal/protocol"
 	"github.com/vegaload/vegaload/internal/protocol/sqlcommon"
+	"github.com/vegaload/vegaload/internal/urlerr"
 )
 
 // Options are the -opt keys this driver accepts. The command's protocol
@@ -187,7 +188,7 @@ func build(target protocol.Target, timeout time.Duration, password *string, conn
 
 	u, err := url.Parse(target.URL)
 	if err != nil {
-		return nil, fmt.Errorf("redis: parsing target URL: %w", err)
+		return nil, fmt.Errorf("redis: parsing target URL: %w", urlerr.Inner(err))
 	}
 	if u.Scheme != "redis" && u.Scheme != "rediss" {
 		return nil, fmt.Errorf("redis: unsupported scheme %q, want redis://", u.Scheme)

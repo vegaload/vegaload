@@ -269,3 +269,31 @@ func TestRunEnded(t *testing.T) {
 		t.Error("deadline passed but timer not fired: ended")
 	}
 }
+
+func TestURLErrors_DoNotRepeatThePassword(t *testing.T) {
+	const secret = "hunter2-secret"
+	allow := func(string) error { return nil }
+	pc := NewProtoClient(allow, time.Second)
+	cases := map[string]func() error{
+		"checkHost, no parse": func() error { return checkHost(allow, "ws://alice:"+secret+"@[::1") },
+		"checkHost, no host":  func() error { return checkHost(allow, "ws://alice:"+secret+"@") },
+		"checkTarget, no parse": func() error {
+			return pc.checkTarget("redis://alice:"+secret+"@[::1", "redis")
+		},
+		"checkTarget, no host": func() error { return pc.checkTarget("redis://alice:"+secret+"@", "redis") },
+		"dial": func() error {
+			_, err := Dial(context.Background(), nil, "ws://alice:"+secret+"@[::1", time.Second, Options{})
+			return err
+		},
+	}
+	for name, f := range cases {
+		err := f()
+		if err == nil {
+			t.Errorf("%s: want an error", name)
+			continue
+		}
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("%s: the error repeats the password", name)
+		}
+	}
+}

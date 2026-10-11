@@ -664,3 +664,23 @@ func TestPythonCheck_WindowsDoesNotTrustAStoreAlias(t *testing.T) {
 		t.Errorf("a PATH entry that does not run must not pass: %+v", r)
 	}
 }
+
+func TestParseTarget_ErrorsDoNotRepeatThePassword(t *testing.T) {
+	const secret = "hunter2-secret"
+	for _, raw := range []string{
+		"alice:" + secret + "@host:443",     // not a URL and not host:port
+		"foo://alice:" + secret + "@host",   // parses, no port and no default
+		"redis://alice:" + secret + "@",     // parses, no host
+		"redis://alice:" + secret + "@[::1", // does not parse
+		"alice:" + secret + "@host",         // no port at all
+	} {
+		_, err := parseTarget(raw)
+		if err == nil {
+			t.Errorf("want an error for the case with %d bytes", len(raw))
+			continue
+		}
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("an error repeats the password for the case with %d bytes", len(raw))
+		}
+	}
+}

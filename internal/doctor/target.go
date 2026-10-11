@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/vegaload/vegaload/internal/safety"
+	"github.com/vegaload/vegaload/internal/urlerr"
 )
 
 type target struct {
@@ -58,24 +59,26 @@ var schemes = map[string]scheme{
 func parseTarget(raw string) (target, error) {
 	if !strings.Contains(raw, "://") {
 		h, p, err := net.SplitHostPort(raw)
-		if err != nil || h == "" || p == "" {
-			return target{}, fmt.Errorf("%q is neither a URL (https://host:port/path) nor host:port", raw)
+		// The port must be a number. "user:password@host" splits into the
+		// host "user" and a "port" that is the password.
+		if err != nil || h == "" || p == "" || !allDigits(p) {
+			return target{}, fmt.Errorf("%q is neither a URL (https://host:port/path) nor host:port", urlerr.Mask(raw))
 		}
 		return target{Host: h, Port: p}, nil
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
-		return target{}, fmt.Errorf("parsing %q: %w", raw, err)
+		return target{}, fmt.Errorf("parsing %q: %w", urlerr.Mask(raw), urlerr.Inner(err))
 	}
 	if u.Hostname() == "" {
-		return target{}, fmt.Errorf("%q has no host", raw)
+		return target{}, fmt.Errorf("%q has no host", urlerr.Mask(raw))
 	}
 	t := target{Scheme: strings.ToLower(u.Scheme), Host: u.Hostname(), Port: u.Port()}
 	if t.Port == "" {
 		t.Port = schemes[t.Scheme].port
 	}
 	if t.Port == "" {
-		return target{}, fmt.Errorf("%q has no port and %q has no default", raw, t.Scheme)
+		return target{}, fmt.Errorf("%q has no port and %q has no default", urlerr.Mask(raw), t.Scheme)
 	}
 	return t, nil
 }
@@ -176,7 +179,7 @@ func probeTarget(ctx context.Context, env Env, t target, raw string) Result {
 	req.Header.Set("User-Agent", "vegaload-doctor/"+env.Version)
 	resp, err := env.HTTPClient.Do(req)
 	if err != nil {
-		r := result(Fail, "no HTTP response from "+u.String()+": "+err.Error())
+		r := result(Fail, "no HTTP response from "+u.Redacted()+": "+err.Error())
 		var unknown x509.UnknownAuthorityError
 		var hostErr x509.HostnameError
 		if errors.As(err, &unknown) || errors.As(err, &hostErr) {
@@ -188,11 +191,11 @@ func probeTarget(ctx context.Context, env Env, t target, raw string) Result {
 	}
 	_ = resp.Body.Close()
 	if resp.StatusCode >= 500 {
-		r := result(Warn, fmt.Sprintf("%s answered HTTP %d", u.String(), resp.StatusCode))
+		r := result(Warn, fmt.Sprintf("%s answered HTTP %d", u.Redacted(), resp.StatusCode))
 		r.Fix = "The server is up but reports an error. A load test would mostly measure that error."
 		return r
 	}
-	return result(Pass, fmt.Sprintf("%s answered HTTP %d", u.String(), resp.StatusCode))
+	return result(Pass, fmt.Sprintf("%s answered HTTP %d", u.Redacted(), resp.StatusCode))
 }
 
 // smokeCheck runs a one-user, one-second test through `vegaload run`.
@@ -238,4 +241,13 @@ func lastLine(s string) string {
 		return s[i+1:]
 	}
 	return s
+}
+
+func allDigits(s string) bool {
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return s != ""
 }
