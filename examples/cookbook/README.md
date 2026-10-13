@@ -255,7 +255,7 @@ jobs:
           done
           echo "The service did not start"; cat service.log; exit 1
 
-      - uses: vegaload/vegaload@v0.8.0
+      - uses: vegaload/vegaload@v0.9.0
         with:
           args: >-
             run -target http://127.0.0.1:8080/widgets -protocol http1
