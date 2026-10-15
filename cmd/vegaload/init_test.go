@@ -5,6 +5,7 @@ import (
 	"github.com/vegaload/vegaload/internal/hosts"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -275,5 +276,147 @@ func TestCmdInit_StatusFailsWhenArgsAreNotMCPServe(t *testing.T) {
 	}
 	if code := cmdInit([]string{"-status", "-editor", "cursor"}); code != 1 {
 		t.Errorf("exit %d, want 1", code)
+	}
+}
+
+// readServers returns the "mcpServers" map of a config file.
+func readServers(t *testing.T, path string) map[string]map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		MCPServers map[string]map[string]any `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("%s is not valid JSON: %v", path, err)
+	}
+	return doc.MCPServers
+}
+
+func TestCmdInit_LiveDirWritesEnv(t *testing.T) {
+	inTempDir(t)
+	live := filepath.Join(t.TempDir(), "shared")
+	if code := cmdInit([]string{"-live-dir", live}); code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	for _, p := range []string{".mcp.json", filepath.Join(".cursor", "mcp.json")} {
+		entry := readServers(t, p)["vegaload"]
+		env, _ := entry["env"].(map[string]any)
+		if len(env) != 1 || env["VEGALOAD_CONFIG_DIR"] != live {
+			t.Errorf("%s: env = %v, want only VEGALOAD_CONFIG_DIR=%s", p, entry["env"], live)
+		}
+	}
+	// The folder is for the MCP server to create; init must not.
+	if _, err := os.Stat(live); err == nil {
+		t.Error("init created the live dir")
+	}
+}
+
+func TestCmdInit_NoLiveDirHasNoEnv(t *testing.T) {
+	inTempDir(t)
+	if code := cmdInit(nil); code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	raw, _ := os.ReadFile(".mcp.json")
+	exe, _ := os.Executable()
+	b, _ := json.Marshal(exe)
+	want := "{\n  \"mcpServers\": {\n    \"vegaload\": {\n      \"command\": " + string(b) +
+		",\n      \"args\": [\n        \"mcp\",\n        \"serve\"\n      ]\n    }\n  }\n}\n"
+	if string(raw) != want {
+		t.Errorf("output without -live-dir changed:\n%s\nwant:\n%s", raw, want)
+	}
+}
+
+func TestCmdInit_LiveDirRerunMerges(t *testing.T) {
+	inTempDir(t)
+	litmus := `{"command":"litmus-lite","args":["mcp"],"env":{"LITMUS_LITE_CONFIG_DIR":"/shared"}}`
+	existing := `{"mcpServers":{` +
+		`"litmus-lite":` + litmus + `,` +
+		`"vegaload":{"command":"/old/vegaload","args":["run"],"env":{"KEEP":"me","VEGALOAD_CONFIG_DIR":"/stale"}}},` +
+		`"other":true}`
+	if err := os.MkdirAll(".cursor", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(".cursor", "mcp.json")
+	if err := os.WriteFile(p, []byte(existing), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	live := filepath.Join(t.TempDir(), "shared")
+
+	// No -force: the live dir still lands, command and args are refreshed.
+	if code := cmdInit([]string{"-editor", "cursor", "-live-dir", live}); code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	exe, _ := os.Executable()
+	servers := readServers(t, p)
+	vl := servers["vegaload"]
+	env, _ := vl["env"].(map[string]any)
+	if vl["command"] != exe || env["VEGALOAD_CONFIG_DIR"] != live || env["KEEP"] != "me" || len(env) != 2 {
+		t.Errorf("vegaload entry = %v", vl)
+	}
+	if args, _ := vl["args"].([]any); len(args) != 2 || args[0] != "mcp" || args[1] != "serve" {
+		t.Errorf("args = %v", vl["args"])
+	}
+	var want map[string]any
+	_ = json.Unmarshal([]byte(litmus), &want)
+	if got := servers["litmus-lite"]; !reflect.DeepEqual(got, want) {
+		t.Errorf("litmus-lite entry disturbed: %v", got)
+	}
+	var doc map[string]any
+	raw, _ := os.ReadFile(p)
+	_ = json.Unmarshal(raw, &doc)
+	if doc["other"] != true {
+		t.Error("top-level key lost")
+	}
+
+	// Same flag again: nothing to change.
+	before := string(raw)
+	if code := cmdInit([]string{"-editor", "cursor", "-live-dir", live}); code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	if after, _ := os.ReadFile(p); string(after) != before {
+		t.Error("second identical run rewrote the file")
+	}
+
+	// Without -live-dir (even with -force) the existing env is untouched.
+	if code := cmdInit([]string{"-editor", "cursor", "-force"}); code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	env2, _ := readServers(t, p)["vegaload"]["env"].(map[string]any)
+	if env2["VEGALOAD_CONFIG_DIR"] != live || env2["KEEP"] != "me" {
+		t.Errorf("env without the flag = %v", env2)
+	}
+	if _, ok := readServers(t, p)["litmus-lite"]; !ok {
+		t.Error("litmus-lite entry lost on -force")
+	}
+}
+
+func TestCmdInit_LiveDirIsMadeAbsolute(t *testing.T) {
+	inTempDir(t)
+	if code := cmdInit([]string{"-live-dir", filepath.Join("rel", "..", "shared")}); code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	wd, _ := os.Getwd()
+	want := filepath.Join(wd, "shared")
+	env, _ := readServers(t, ".mcp.json")["vegaload"]["env"].(map[string]any)
+	if got, _ := env["VEGALOAD_CONFIG_DIR"].(string); got != want || !filepath.IsAbs(got) {
+		t.Errorf("VEGALOAD_CONFIG_DIR = %q, want %q", got, want)
+	}
+}
+
+func TestAbsLiveDir_ExpandsTilde(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	for in, want := range map[string]string{
+		"~":           home,
+		"~/rt/shared": filepath.Join(home, "rt", "shared"),
+	} {
+		got, err := absLiveDir(in)
+		if err != nil || got != want {
+			t.Errorf("absLiveDir(%q) = %q, %v; want %q", in, got, err, want)
+		}
 	}
 }

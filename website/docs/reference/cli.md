@@ -126,6 +126,8 @@ By default a run is shown live in the browser. See [`docs/streaming.md`](https:/
 | `-label` | | A `key=value` label on every event. Repeat the flag. |
 | | `VEGALOAD_CONFIG_DIR` | The folder where the live view keeps this machine's project (`live.json`). |
 
+To share one live view project with litmus-lite (a load run and a chaos run on one page), run `vegaload init -live-dir DIR` and give litmus-lite's MCP server the same folder. Terminal runs still use the default folder unless you export `VEGALOAD_CONFIG_DIR`.
+
 A flag wins over its variable. The live view sends the run's numbers, thresholds, step and protocol names, labels and the target (without credentials) to the service. It never sends headers, bodies, options, environment values, secrets or data. Turn it off with `-no-live` or `VEGALOAD_LIVE=off`.
 
 ### Safety
@@ -230,7 +232,10 @@ vegaload init [flags]
 | `-dir` | Project folder. Default `.`. |
 | `-status` | Change nothing. Report what is set up. Exit 1 if anything is missing. |
 | `-force` | Overwrite files that exist. |
+| `-live-dir DIR` | Add `env` `VEGALOAD_CONFIG_DIR=DIR` (made absolute) to the `vegaload` MCP entry, so the server keeps its [live view](#live-view-and-streaming) project in `DIR`. Use the same folder for litmus-lite's MCP server to share one project. An existing entry is updated even without `-force`; other servers and `env` keys are kept. Without the flag there is no `env`. |
 | `-output` | `text` or `json`. |
+
+`-live-dir` only changes the MCP server. A `vegaload run` in a terminal uses the default folder unless you export `VEGALOAD_CONFIG_DIR`.
 
 ## `doctor`
 

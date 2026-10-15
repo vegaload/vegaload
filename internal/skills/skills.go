@@ -39,8 +39,9 @@ var CursorSmoke string
 // mcpServerEntry is one entry under a Claude Code or Cursor MCP config
 // file's "mcpServers" key — both tools share this schema.
 type mcpServerEntry struct {
-	Command string   `json:"command"`
-	Args    []string `json:"args"`
+	Command string         `json:"command"`
+	Args    []string       `json:"args"`
+	Env     map[string]any `json:"env,omitempty"`
 }
 
 // MergeMCPServerConfig takes an existing MCP config file's raw JSON
@@ -52,6 +53,21 @@ type mcpServerEntry struct {
 // is false, so a second `vegaload init` doesn't clobber a hand-edited
 // config by default.
 func MergeMCPServerConfig(existing []byte, exePath string, force bool) (merged []byte, changed bool, err error) {
+	return MergeMCPServerConfigEnv(existing, exePath, force, nil)
+}
+
+// MergeMCPServerConfigEnv is MergeMCPServerConfig plus environment
+// variables for the server. Each key in env is set (or replaced) in the
+// entry's "env" object; env keys already there and not named in env are
+// kept, and with a nil or empty env an existing "env" is left as it is.
+// The entry has no "env" key at all when nothing sets one, so the output
+// without env is the same as MergeMCPServerConfig's always was.
+//
+// When env is not empty the entry is brought up to date even if it
+// exists and force is false: command and args are refreshed and the env
+// keys set. Nothing is written (changed is false) when that produces the
+// file already on disk.
+func MergeMCPServerConfigEnv(existing []byte, exePath string, force bool, env map[string]string) (merged []byte, changed bool, err error) {
 	doc := map[string]any{}
 	if len(existing) > 0 {
 		if err := json.Unmarshal(existing, &doc); err != nil {
@@ -63,16 +79,36 @@ func MergeMCPServerConfig(existing []byte, exePath string, force bool) (merged [
 	if servers == nil {
 		servers = map[string]any{}
 	}
-	if _, exists := servers["vegaload"]; exists && !force {
+	cur, exists := servers["vegaload"]
+	if exists && !force && len(env) == 0 {
 		return existing, false, nil
 	}
 
-	servers["vegaload"] = mcpServerEntry{Command: exePath, Args: []string{"mcp", "serve"}}
+	entry := mcpServerEntry{Command: exePath, Args: []string{"mcp", "serve"}}
+	if old, ok := cur.(map[string]any); ok {
+		if oldEnv, ok := old["env"].(map[string]any); ok && len(oldEnv) > 0 {
+			entry.Env = map[string]any{}
+			for k, v := range oldEnv {
+				entry.Env[k] = v
+			}
+		}
+	}
+	for k, v := range env {
+		if entry.Env == nil {
+			entry.Env = map[string]any{}
+		}
+		entry.Env[k] = v
+	}
+	servers["vegaload"] = entry
 	doc["mcpServers"] = servers
 
 	out, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
 		return nil, false, fmt.Errorf("encoding merged config: %w", err)
 	}
-	return append(out, '\n'), true, nil
+	out = append(out, '\n')
+	if exists && !force && string(out) == string(existing) {
+		return existing, false, nil
+	}
+	return out, true, nil
 }

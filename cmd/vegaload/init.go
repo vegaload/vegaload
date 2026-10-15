@@ -38,11 +38,14 @@ func cmdInit(args []string) int {
 	output := fs.String("output", "text", "output mode: text or json")
 	editor := fs.String("editor", "all", "editors to set up: all, or a comma list of claude-code, cursor")
 	status := fs.Bool("status", false, "only report what is set up; change nothing; exit 1 if anything is missing")
+	liveDir := fs.String("live-dir", "", "keep the MCP server's live-view identity (live.json) in `DIR`, shared with other tools such as litmus-lite: writes env VEGALOAD_CONFIG_DIR=DIR (made absolute) into the vegaload MCP entry")
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "Usage: vegaload init [flags]")
 		fmt.Fprintln(fs.Output(), "Registers VegaLoad's MCP server and skill bundles for this project")
 		fmt.Fprintln(fs.Output(), "(Claude Code: .claude/skills/vegaload and vegaload-smoke, .mcp.json; Cursor: .cursor/rules, .cursor/mcp.json).")
 		fmt.Fprintln(fs.Output(), "Use -editor to set up only one editor, and -status to see what is set up.")
+		fmt.Fprintln(fs.Output(), "Use -live-dir DIR to give the MCP server a shared live-view folder (env VEGALOAD_CONFIG_DIR);")
+		fmt.Fprintln(fs.Output(), "it also updates an existing vegaload entry without -force. Terminal runs are not affected.")
 		fmt.Fprintln(fs.Output(), "Run \"vegaload doctor\" afterwards to check that everything is wired up.")
 		fs.PrintDefaults()
 	}
@@ -61,6 +64,16 @@ func cmdInit(args []string) int {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "vegaload init: -editor: %v\n", err)
 		return 2
+	}
+
+	var mcpEnv map[string]string
+	if *liveDir != "" {
+		abs, err := absLiveDir(*liveDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "vegaload init: -live-dir: %v\n", err)
+			return 2
+		}
+		mcpEnv = map[string]string{"VEGALOAD_CONFIG_DIR": abs}
 	}
 
 	exePath, err := os.Executable()
@@ -85,7 +98,7 @@ func cmdInit(args []string) int {
 		var res initResult
 		var err error
 		if a.Kind == "mcp" {
-			res, err = hosts.MergeConfigFile(path, exePath, *force)
+			res, err = hosts.MergeConfigFileEnv(path, exePath, *force, mcpEnv)
 		} else {
 			res, err = hosts.WriteFile(path, a.Content, *force)
 		}
@@ -111,6 +124,21 @@ func cmdInit(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// absLiveDir makes the -live-dir value absolute. A leading ~ is expanded
+// to the home directory in case the shell did not do it (for example
+// when the value was quoted). The folder is not created here: the MCP
+// server makes it when it first writes live.json.
+func absLiveDir(v string) (string, error) {
+	if v == "~" || strings.HasPrefix(v, "~/") || strings.HasPrefix(v, `~\`) {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("expanding ~: %v", err)
+		}
+		v = filepath.Join(home, v[1:])
+	}
+	return filepath.Abs(v)
 }
 
 // parseEditors turns the -editor value into a set of host IDs.

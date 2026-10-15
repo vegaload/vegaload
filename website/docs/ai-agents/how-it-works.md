@@ -54,7 +54,10 @@ Useful options:
 vegaload init -editor cursor          # one editor only
 vegaload init -status                 # show what is set up, change nothing
 vegaload init -force                  # overwrite what is out of date
+vegaload init -live-dir ~/.rt-demo    # MCP server keeps its live view project in this folder
 ```
+
+`-live-dir DIR` adds `"env": {"VEGALOAD_CONFIG_DIR": "<absolute DIR>"}` to the `vegaload` server entry, so the server and litmus-lite's server can share one live view project. Without it the entry has no `env`.
 
 `-status` shows each file as `ok`, `missing`, `outdated`, `other binary`, `wrong args` or `invalid`. It exits 1 if anything is not `ok`.
 

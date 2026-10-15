@@ -638,6 +638,32 @@ func TestCheckTimeoutIsEnforced(t *testing.T) {
 	}
 }
 
+// An entry with an env block (init -live-dir) passes the registration
+// checks, and the handshake probe is started with that env.
+func TestEnvBlockPassesHostChecks(t *testing.T) {
+	env := testEnv(t)
+	live := filepath.Join(t.TempDir(), "shared")
+	if _, err := hosts.MergeConfigFileEnv(filepath.Join(env.Dir, ".mcp.json"), env.Exe, false,
+		map[string]string{"VEGALOAD_CONFIG_DIR": live}); err != nil {
+		t.Fatal(err)
+	}
+	var gotEnv map[string]string
+	probe := env.Probe
+	env.Probe = func(ctx context.Context, c mcpprobe.Command) (mcpprobe.Info, error) {
+		gotEnv = c.Env
+		return probe(ctx, c)
+	}
+	rep := run(t, env, Options{Hosts: []string{"claude-code"}})
+	for _, id := range []string{"host.claude-code.config", "host.claude-code.command", "host.claude-code.handshake"} {
+		if r := byID(t, rep, id); r.Status != Pass {
+			t.Errorf("%s = %+v", id, r)
+		}
+	}
+	if gotEnv["VEGALOAD_CONFIG_DIR"] != live {
+		t.Errorf("probe env = %v", gotEnv)
+	}
+}
+
 func TestIsPathCommand(t *testing.T) {
 	for cmd, want := range map[string]bool{
 		"vegaload": false, "vegaload.exe": false,

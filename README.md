@@ -1488,6 +1488,21 @@ copy of `vegaload`), `wrong args` (the MCP entry does not run `mcp serve`) or
 `invalid` (the file cannot be read). It exits 1 if anything is not `ok`, so a script can check
 it. Run `vegaload init -force` to fix what it reports.
 
+To keep the MCP server's live view project in a folder you choose, for example
+one shared with litmus-lite's MCP server, use `-live-dir`:
+
+```
+./vegaload init -live-dir ~/.rt-demo
+```
+
+This adds `"env": {"VEGALOAD_CONFIG_DIR": "<absolute folder>"}` to the `vegaload`
+entry in `.mcp.json` and `.cursor/mcp.json` (a relative folder is made absolute).
+Without the flag the entry has no `env`. With the flag, an entry that already
+exists is updated even without `-force`: its command and args are refreshed, the
+variable is set, and other servers and other `env` keys are left alone. Runs you
+start from a terminal still use the default folder unless you export
+`VEGALOAD_CONFIG_DIR` yourself. See [Live view](#live-view).
+
 By default the MCP server talks over stdio. To use it over the network (for
 example from a container), run it over HTTP:
 
@@ -1590,6 +1605,14 @@ vegaload live            # print this machine's page address
 vegaload live -open      # and open it
 vegaload live reset      # start a new project (old runs stay at the old address)
 ```
+
+To share one project between VegaLoad and litmus-lite (a load run and a chaos
+run on one page, for a demo), register both MCP servers with the same folder:
+`vegaload init -live-dir DIR` writes `VEGALOAD_CONFIG_DIR=DIR` into VegaLoad's MCP
+entry, and litmus-lite's init does the same with `LITMUS_LITE_CONFIG_DIR`. The
+two tools use the same `live.json` format. Only the MCP servers are affected:
+a `vegaload run` in a terminal keeps using the default folder unless you export
+`VEGALOAD_CONFIG_DIR` there too.
 
 To keep the events for your own tools:
 
@@ -1705,7 +1728,7 @@ MySQL, Redis and SFTP.
 | `vegaload diagnose`      | Print environment info, or explain a report's results                |
 | `vegaload mcp serve`     | Run an MCP server over stdio (or `-http addr`) for agent-native use   |
 | `vegaload mcp eval`      | Run the versioned MCP tool-calling eval suite against this binary     |
-| `vegaload init`          | Register the MCP server and skill bundles (`-editor`, `-status`)      |
+| `vegaload init`          | Register the MCP server and skill bundles (`-editor`, `-status`, `-live-dir`) |
 | `vegaload doctor`        | Check the CLI, agent hosts, and a target; `-fix` repairs what it can   |
 | `vegaload protocols`     | List the supported protocols, with options and examples               |
 | `vegaload live`          | Print or open this machine's live view page; `live reset` starts a new project |

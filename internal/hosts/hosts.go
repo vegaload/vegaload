@@ -430,6 +430,13 @@ func WriteFile(path, content string, force bool) (WriteResult, error) {
 // "vegaload" MCP server entry pointing at exePath, and writes the result
 // back, keeping every other key and server. See skills.MergeMCPServerConfig.
 func MergeConfigFile(path, exePath string, force bool) (WriteResult, error) {
+	return MergeConfigFileEnv(path, exePath, force, nil)
+}
+
+// MergeConfigFileEnv is MergeConfigFile that also sets the given
+// environment variables on the entry. See skills.MergeMCPServerConfigEnv
+// for how an existing entry and its env are merged.
+func MergeConfigFileEnv(path, exePath string, force bool, env map[string]string) (WriteResult, error) {
 	var existing []byte
 	existed := false
 	if data, err := os.ReadFile(path); err == nil {
@@ -439,7 +446,7 @@ func MergeConfigFile(path, exePath string, force bool) (WriteResult, error) {
 		return WriteResult{}, err
 	}
 
-	merged, changed, err := skills.MergeMCPServerConfig(existing, exePath, force)
+	merged, changed, err := skills.MergeMCPServerConfigEnv(existing, exePath, force, env)
 	if err != nil {
 		return WriteResult{}, err
 	}
