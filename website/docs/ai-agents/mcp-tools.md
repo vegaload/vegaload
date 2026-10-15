@@ -26,6 +26,8 @@ The VegaLoad MCP server has nine tools. Each one is a thin wrapper around a comm
 
 It also takes the load shape (`vus`, `duration`, `executor`, `stages`, `rate`), `thresholds`, `baseline_path`, data files and environment values, and where to write the HTML, JSON and JUnit reports. Example thresholds: `"p95 < 300ms"`, `"error_rate < 1%"`, `"p95{protocol=\"ftp\"} < 500ms"`.
 
+It also takes `live`, `no-live` and `no-open`, and `stream_file`, `stream_push`, `run_id` and `labels`. By default the run is shown live in the user's browser. The first text item of the answer is always the result JSON. The live view address comes as a second text item, `live view: URL`, and the agent should tell the user. There is no argument for a push token. See [Live view and streaming](../reference/cli.md#live-view-and-streaming).
+
 A threshold breach is a normal result with `thresholds_passed` set to false. It is not a tool error. From a terminal, the same run exits 3.
 
 A target that is not localhost is refused unless it is in `allow_targets`, or `yes` is true. See [Safety](/ai-agents/safety).

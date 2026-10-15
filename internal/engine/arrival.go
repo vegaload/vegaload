@@ -62,6 +62,7 @@ func (c ConstantArrivalRate) Run(ctx context.Context, iter IterationFunc, rec Re
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	tr, _ := rec.(IterationTracker)
 	sem := make(chan struct{}, maxVUs)
 	var wg sync.WaitGroup
 	nextVUID := 0
@@ -81,6 +82,9 @@ func (c ConstantArrivalRate) Run(ctx context.Context, iter IterationFunc, rec Re
 					defer wg.Done()
 					defer func() { <-sem }()
 					start := time.Now()
+					if tr != nil {
+						tr.Begin(start)
+					}
 					err := iter(ctx)
 					recordIteration(ctx, rec, IterationResult{
 						VUID:     id,
@@ -88,6 +92,9 @@ func (c ConstantArrivalRate) Run(ctx context.Context, iter IterationFunc, rec Re
 						Duration: time.Since(start),
 						Err:      err,
 					})
+					if tr != nil {
+						tr.End(start)
+					}
 				}()
 			default:
 				// MaxVUs are all busy: drop this arrival rather than

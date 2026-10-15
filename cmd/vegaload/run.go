@@ -47,6 +47,7 @@ import (
 	"github.com/vegaload/vegaload/internal/compare"
 	"github.com/vegaload/vegaload/internal/engine"
 	"github.com/vegaload/vegaload/internal/inputs"
+	"github.com/vegaload/vegaload/internal/live"
 	"github.com/vegaload/vegaload/internal/protocol"
 	"github.com/vegaload/vegaload/internal/protocol/xfercommon"
 	"github.com/vegaload/vegaload/internal/report"
@@ -186,6 +187,12 @@ type runConfig struct {
 	DataSets map[string]*inputs.Set
 	DataPick string
 	DataPlan *dataPlan
+
+	// Stream holds the -stream-*, -run-id, -label and live view flags
+	// (docs/streaming.md). stream is what they produced for this run; it is
+	// nil when the run is not streamed, and then nothing streams.
+	Stream runStream
+	stream *streaming
 }
 
 // parseRunArgs parses run's flags into a runConfig. It returns a usage
@@ -237,7 +244,10 @@ func parseRunArgs(args []string) (*runConfig, error) {
 	fs.StringVar(&cfg.OutputMode, "output", "text", "output mode: text, json, or jsonl (FR-CLI-05's structured and streaming modes)")
 	fs.StringVar(&cfg.ReportPath, "report", "", "path for the self-contained HTML report (default: vegaload-report-<timestamp>.html)")
 	fs.BoolVar(&cfg.NoReport, "no-report", false, "skip writing the HTML report")
-	fs.BoolVar(&cfg.NoOpen, "no-open", false, "don't auto-open the HTML report in the default browser")
+	fs.BoolVar(&cfg.NoOpen, "no-open", false, "don't open a browser tab: neither the HTML report nor the live view page (also VEGALOAD_OPEN=off). The live view still streams. When the live view page opens, the HTML report is written but not opened")
+
+	// docs/streaming.md: stream the run, and the live view.
+	cfg.Stream.register(fs)
 
 	// FR-CLI-11: pass/fail thresholds.
 	fs.Var(&thresholdExprs, "threshold", "pass/fail threshold on the run, e.g. \"p95 < 300ms\", \"p95{step=\\\"login\\\"} < 300ms\" or \"p95{protocol=\\\"ftp\\\"} < 500ms\" (repeatable; metrics: "+strings.Join(threshold.MetricNames(), ", ")+"). A breach exits 3")
@@ -713,6 +723,15 @@ func runScenarioWithCollector(cfg *runConfig, collector *report.Collector) (*rep
 	cfg.stepRecorder = collector
 	cfg.callRecorder = collector
 
+	// A streamed run says it has started before the scenario is loaded, so a
+	// scenario that cannot be loaded is a run.failed after a run.started.
+	var feed *pointFeed
+	if cfg.stream != nil {
+		feed = cfg.stream.begin(cfg, ex, collector)
+		// Every path out of here, an error included, ends the points.
+		defer feed.finish()
+	}
+
 	iter, closeFn, err := buildIteration(cfg)
 	if err != nil {
 		return nil, err
@@ -863,6 +882,31 @@ func cmdRun(args []string) int {
 		abortNote(os.Stderr, cfg.Thresholds)
 	}
 
+	// The stream and the live view, when there is one. A destination that
+	// breaks a rule stops the run before it starts.
+	st, err := cfg.Stream.setup(cfg.NoOpen)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "vegaload run: %v\n", err)
+		return 2
+	}
+	var out runOutcome
+	if st != nil {
+		cfg.stream = st
+		for _, w := range st.warnings {
+			fmt.Fprintln(os.Stderr, w)
+		}
+		st.watchSignals()
+	}
+	code := executeRun(cfg, &out)
+	st.end(cfg, &out, code)
+	return code
+}
+
+// executeRun is the run itself: the load test, its outputs and its gates. It
+// returns the process exit code. out gets the result, or why there is none, so
+// that the stream can end with the right event.
+func executeRun(cfg *runConfig, out *runOutcome) int {
+	var err error
 	var result *report.Result
 	switch cfg.OutputMode {
 	case "jsonl":
@@ -875,9 +919,11 @@ func cmdRun(args []string) int {
 	}
 	recordAudit("run", cfg, result, err)
 	if err != nil {
+		out.fail(err)
 		fmt.Fprintf(os.Stderr, "vegaload run: %s\n", secrets.Redact(err.Error()))
 		return 1
 	}
+	out.result = result
 
 	switch cfg.OutputMode {
 	case "json":
@@ -1000,6 +1046,18 @@ func runJSONL(cfg *runConfig, w io.Writer) (*report.Result, error) {
 	return result, nil
 }
 
+// opensReport says whether the HTML report is opened in the browser when it
+// is written. It is not with -no-open or VEGALOAD_OPEN=off (which stop every
+// browser tab), when the live view is showing the run (its page is the tab),
+// or for a run an agent started (-trigger mcp...), which has no one at the
+// screen to want a second tab.
+func (c *runConfig) opensReport() bool {
+	if c.NoOpen || (c.stream != nil && c.stream.liveActive) || strings.HasPrefix(c.Trigger, "mcp") {
+		return false
+	}
+	return live.OpenEnvAllows()
+}
+
 // writeAndMaybeOpenReport implements FR-RPT-01/02: write the
 // self-contained HTML report, then (unless -no-open) best-effort open
 // it in the default browser. Both steps are reported to the caller as
@@ -1015,7 +1073,7 @@ func writeAndMaybeOpenReport(cfg *runConfig, result *report.Result) error {
 	if cfg.OutputMode == "text" {
 		fmt.Printf("report: %s\n", path)
 	}
-	if !cfg.NoOpen {
+	if cfg.opensReport() {
 		if err := openBrowser(path); err != nil {
 			return fmt.Errorf("opening report in browser (the file itself was written to %s): %w", path, err)
 		}
@@ -1055,6 +1113,9 @@ func recordAudit(command string, cfg *runConfig, result *report.Result, runErr e
 	}
 	for _, t := range cfg.Thresholds {
 		entry.Thresholds = append(entry.Thresholds, t.Expression())
+	}
+	if cfg.stream != nil {
+		entry.Stream = cfg.stream.audit // kinds and hosts, never a path, query, id or token
 	}
 	if cfg.DataPlan != nil {
 		for _, f := range cfg.DataPlan.files {

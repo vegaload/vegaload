@@ -3,7 +3,9 @@
 VegaLoad is a thin, open-source load testing tool: a single static binary
 with a scriptable core engine, protocol drivers (HTTP/1.1, HTTP/2, gRPC,
 WebSocket, MQTT, Kafka, PostgreSQL, and raw TCP and UDP), and a self-contained HTML report — no server, no account,
-no telemetry.
+no telemetry. (The one thing that leaves a run is the live view, which sends it to a
+service you choose, a local one by default, and which you can turn off:
+see [Watch a run live](#watch-a-run-live-or-stream-it).)
 
 It's also agent-native: `vegaload init` registers VegaLoad as an MCP server
 for Claude Code, Cursor, or any other MCP-capable agent host, so an agent
@@ -1548,6 +1550,79 @@ credentials.
 See [`examples/scenarios/README.md`](./examples/scenarios/README.md) for
 this same walkthrough as a standalone, copy-pasteable script.
 
+## Watch a run live, or stream it
+
+A `vegaload run` is also shown live in your browser. It sends the run, as it
+happens, to a live view service, prints the page's address on stderr, and opens
+it:
+
+```
+live view: http://127.0.0.1:7080/p/p-w3g5...
+```
+
+The first run makes a project for this machine and keeps its identity in
+`live.json` (mode 0600) in your config folder, under `vegaload/`
+(`VEGALOAD_CONFIG_DIR` replaces that whole folder). The project id is in the page
+address, so keep the address to yourself. The push token never leaves that
+file except as a Bearer token to the service. VegaLoad checks the service with
+`GET /v1/health` first (at most 1.5 seconds). If it is not there, the run goes
+on and says why. A problem with the live view never fails or changes a run.
+
+The live view is on unless:
+
+- you pass `-no-live`, or set `VEGALOAD_LIVE=off`;
+- `CI` is set (not empty, `0` or `false`);
+- you choose a destination for the run's events with `-stream-file` or
+  `-stream-push`. `-live` adds the live view to those, and beats `CI`.
+
+This is the one exception to "nothing leaves your machine": the run's numbers,
+its thresholds, step and protocol names, labels and the target without
+credentials go to the live view service. Headers, request bodies, options,
+environment values, secrets and data cells are never sent.
+
+The browser opens on every run, except with `-no-open`, `VEGALOAD_OPEN=off`, in
+CI, or on Linux with no display. `-no-open` now stops every browser tab
+VegaLoad would open, the HTML report included. When the live view page opens,
+the HTML report is still written but is not opened as well.
+
+```
+vegaload live            # print this machine's page address
+vegaload live -open      # and open it
+vegaload live reset      # start a new project (old runs stay at the old address)
+```
+
+To keep the events for your own tools:
+
+```
+vegaload run -stream-file auto -run-id nightly-42 -label service=checkout -threshold "p95 < 300ms" ./checkout.vl.js
+```
+
+writes `.vegaload/runs/nightly-42.ndjson`: one JSON event per line
+(`run.started`, one `point` per second, then `run.finished` with the same JSON
+`-out` writes, plus `passed` and `exitCode`). `-stream-push URL` POSTs the same
+events to an HTTP endpoint, with retry; the Bearer token comes from
+`VEGALOAD_STREAM_TOKEN`, and `http://` to a host that is not loopback is refused
+unless you pass `-stream-insecure`. The format is in
+[`docs/streaming.md`](./docs/streaming.md).
+
+| Flag | Variable | What it does |
+|------|----------|--------------|
+| `-stream-file PATH` | `VEGALOAD_STREAM_FILE` | Write the events as NDJSON. `auto` is `.vegaload/runs/<run id>.ndjson` |
+| `-stream-push URL[,URL]` | `VEGALOAD_STREAM_PUSH` | POST the events to an ingest URL (repeatable) |
+| | `VEGALOAD_STREAM_TOKEN` | Bearer token for `-stream-push` |
+| `-stream-insecure` | | Allow `-stream-push` over `http://` to a host that is not loopback |
+| `-run-id ID` | `VEGALOAD_RUN_ID` | The run id on every event (default: 12 random hex digits) |
+| `-label key=value` | | A label on every event (repeatable) |
+| `-live`, `-no-live` | `VEGALOAD_LIVE=off` | Force the live view on, or turn it off |
+| `-live-url URL` | `VEGALOAD_LIVE_URL` | Address of the live view service (default `http://127.0.0.1:7080`) |
+| `-no-open` | `VEGALOAD_OPEN=off` | Open no browser tab |
+| | `VEGALOAD_CONFIG_DIR` | Where `live.json` is kept |
+
+A flag wins over its variable. From an agent, `run_test` takes `live`,
+`no-live`, `no-open`, `stream_file`, `stream_push`, `run_id` and `labels`
+(there is no argument for the token or `-stream-insecure`). The first text item
+of its answer stays the result JSON; `live view: URL` comes as a second item.
+
 ## Supported protocols
 
 `vegaload protocols` prints this list. `vegaload protocols NAME` prints one
@@ -1633,6 +1708,7 @@ MySQL, Redis and SFTP.
 | `vegaload init`          | Register the MCP server and skill bundles (`-editor`, `-status`)      |
 | `vegaload doctor`        | Check the CLI, agent hosts, and a target; `-fix` repairs what it can   |
 | `vegaload protocols`     | List the supported protocols, with options and examples               |
+| `vegaload live`          | Print or open this machine's live view page; `live reset` starts a new project |
 
 Every command supports `-output text` (default), `json`, or (`run` only)
 `jsonl`. Run `vegaload <command> -h` for its full flag list, or `vegaload

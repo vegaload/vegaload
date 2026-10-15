@@ -49,6 +49,8 @@ func run(args []string) int {
 		return cmdValidate(args[1:])
 	case "import":
 		return cmdImport(args[1:])
+	case "live":
+		return cmdLive(args[1:])
 	case "version":
 		fmt.Printf("vegaload %s\n", version)
 		return 0
@@ -78,6 +80,7 @@ Commands:
   init       Register the MCP server and skill bundles for this project
   validate   Run a scenario once, with one user, to check that it works
   import     Make a scenario from a recording (import har <file.har>)
+  live       Print or open this machine's live view page; "live reset" makes a new project
   doctor     Check that VegaLoad is set up and working (CLI, agent hosts, target)
   protocols  List the supported protocols, with options and examples
   version    Print the vegaload version
@@ -87,6 +90,16 @@ Every command supports -output text (default) or json; run and doctor also suppo
 "run -threshold" makes a run pass or fail on its own numbers; a breached threshold exits 3.
 A "run" also writes a self-contained HTML report by default — see
 "vegaload run -h" for -report/-no-report/-no-open.
+
+A "run" is also shown live in your browser by default (the live view): it prints
+"live view: URL" on stderr and opens the page. -no-live or VEGALOAD_LIVE=off turns
+it off; it is off in CI and when you choose a -stream-file or -stream-push
+destination for the run's events. -no-open (or VEGALOAD_OPEN=off) opens no browser
+tab at all. Run flags for this: -stream-file, -stream-push, -stream-insecure,
+-run-id, -label, -live, -no-live, -live-url. Variables: VEGALOAD_STREAM_FILE,
+VEGALOAD_STREAM_PUSH, VEGALOAD_STREAM_TOKEN (the Bearer token for -stream-push),
+VEGALOAD_RUN_ID, VEGALOAD_LIVE, VEGALOAD_LIVE_URL, VEGALOAD_OPEN and
+VEGALOAD_CONFIG_DIR (where the live view keeps this machine's project).
 
 Run "vegaload run -h" for the run command's flags.
 Run "vegaload compare -h" for baseline-vs-candidate flags.

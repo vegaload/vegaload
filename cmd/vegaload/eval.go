@@ -51,6 +51,10 @@ func cmdMCPEval(args []string) int {
 		fmt.Fprintf(os.Stderr, "vegaload mcp eval: -output %q: want text or json\n", output)
 		return 2
 	}
+	// The eval makes real `run` calls. They must not stream to a live view
+	// service on this machine, or open its page, each time it is run. The
+	// calls run as child processes and inherit this.
+	os.Setenv("VEGALOAD_LIVE", "off")
 	rawSuite, ok := eval.Raw(suiteName)
 	if !ok {
 		fmt.Fprintf(os.Stderr, "vegaload mcp eval: -suite %q: want v1 or v2\n", suiteName)

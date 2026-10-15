@@ -127,3 +127,14 @@ func TestLoadBundlesPointToSmoke(t *testing.T) {
 		t.Error("smoke skill needs its frontmatter name")
 	}
 }
+
+// Every bundle tells the agent to relay the live view's address.
+func TestBundlesTellTheAgentToRelayTheLiveViewURL(t *testing.T) {
+	for name, body := range map[string]string{"claude": ClaudeCode, "cursor": Cursor, "claude-smoke": ClaudeCodeSmoke, "cursor-smoke": CursorSmoke} {
+		for _, want := range []string{"live view: URL", "no-live", "no-open"} {
+			if !strings.Contains(body, want) {
+				t.Errorf("%s: missing %q", name, want)
+			}
+		}
+	}
+}

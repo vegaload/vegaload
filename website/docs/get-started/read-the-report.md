@@ -14,7 +14,7 @@ Every run writes a summary to the terminal. It can also write three files. Use t
 | JSON summary | `-out run.json` | A script, an agent, or a later comparison. |
 | JUnit XML | `-junit junit.xml` | CI. Each threshold and check shows as a test case. |
 
-The HTML report is written to `vegaload-report-<timestamp>.html` if you do not give a path. VegaLoad opens it for you unless you pass `-no-open`.
+The HTML report is written to `vegaload-report-<timestamp>.html` if you do not give a path. VegaLoad opens it for you unless you pass `-no-open`. When the [live view](../reference/cli.md#live-view-and-streaming) is showing the run, its page opens instead, and the report is written but not opened.
 
 ## The terminal summary
 

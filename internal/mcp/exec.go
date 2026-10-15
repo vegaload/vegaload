@@ -23,12 +23,22 @@ import (
 // A non-zero exit is reported as an error that includes stderr, since
 // every vegaload subcommand writes its own error messages there.
 func RunCLI(ctx context.Context, exePath string, args ...string) ([]byte, error) {
+	stdout, _, err := RunCLISplit(ctx, exePath, args...)
+	return stdout, err
+}
+
+// RunCLISplit is RunCLI that also returns stderr, kept apart from stdout. A
+// command's stdout is the data a tool parses (its -output json); its stderr
+// is notes for a person, such as `run`'s "live view: URL" line. Mixing the two
+// would let a note break the parsing, so a tool that wants the notes asks for
+// them here and returns them beside its result (see WithNotes).
+func RunCLISplit(ctx context.Context, exePath string, args ...string) (stdout, stderr []byte, err error) {
 	cmd := exec.CommandContext(ctx, exePath, args...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	var out, errb bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errb
 	if err := cmd.Run(); err != nil {
-		return stdout.Bytes(), fmt.Errorf("vegaload %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
+		return out.Bytes(), errb.Bytes(), fmt.Errorf("vegaload %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(errb.String()))
 	}
-	return stdout.Bytes(), nil
+	return out.Bytes(), errb.Bytes(), nil
 }

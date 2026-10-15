@@ -49,6 +49,20 @@ type Recorder interface {
 	Record(IterationResult)
 }
 
+// IterationTracker is an optional extra for a Recorder that wants to know
+// which iterations are running, not only which have finished (a live view
+// needs this to tell an empty second from one whose calls have not ended yet).
+// An executor checks for it once and, when the Recorder has it, calls Begin
+// with an iteration's start time just before the iteration runs, and End with
+// the same start time once the iteration is over and has been given to Record
+// (or dropped, when it was cut off by the end of the run). Begin and End are
+// always paired and may be called from any goroutine. The engine does nothing
+// else with it: it does not know what the Recorder uses it for.
+type IterationTracker interface {
+	Begin(start time.Time)
+	End(start time.Time)
+}
+
 // Summary is a minimal Recorder that keeps running counts: total
 // iterations, failed iterations, and mean duration. It exists so the
 // engine and its tests have something to record into in Phase 0,

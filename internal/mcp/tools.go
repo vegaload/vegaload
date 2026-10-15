@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/vegaload/vegaload/internal/report"
@@ -113,6 +114,19 @@ type runTestArgs struct {
 	DataFiles     []string `json:"data_files,omitempty"`
 	Env           []string `json:"env,omitempty"`
 	SecretEnv     []string `json:"secret_env,omitempty"`
+
+	// The live view and streaming (docs/streaming.md). There is no field for
+	// the push token or for -stream-insecure: the token comes from the
+	// environment of the server, and nothing here can relax the CLI's rules.
+	Live       bool     `json:"live,omitempty"`
+	NoLive     bool     `json:"no-live,omitempty"`
+	NoOpen     bool     `json:"no-open,omitempty"`
+	NoLiveAlt  bool     `json:"no_live,omitempty"` // the same, as an agent may spell it
+	NoOpenAlt  bool     `json:"no_open,omitempty"` // the same, as an agent may spell it
+	StreamFile string   `json:"stream_file,omitempty"`
+	StreamPush string   `json:"stream_push,omitempty"`
+	RunID      string   `json:"run_id,omitempty"`
+	Labels     []string `json:"labels,omitempty"`
 }
 
 func runTestTool(exePath string) Tool {
@@ -126,7 +140,12 @@ func runTestTool(exePath string) Tool {
 			"(each like \"p95 < 300ms\", \"p95{protocol=\\\"ftp\\\"} < 500ms\" or \"error_rate < 1%\") make the run pass or fail: the result then carries " +
 			"thresholds and thresholds_passed. A breached threshold is a normal result with thresholds_passed false, " +
 			"not a tool error — the same run exits 3 from a terminal. With baseline_path the run is also compared with an earlier " +
-			"report, and the result carries baseline with passed true or false; a worse run is a normal result too.",
+			"report, and the result carries baseline with passed true or false; a worse run is a normal result too. " +
+			"By default the run is also shown live in the user's browser (the live view): the page opens by itself, " +
+			"and its address is in a second text item of the result, \"live view: URL\". The first text item is " +
+			"always the result JSON. Tell the user that URL. Pass no-live only if the user does not want the live view, " +
+			"or no-open to stream without opening a browser. The live view is off in CI and when stream_file or " +
+			"stream_push is given (pass live to keep it on as well).",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -153,6 +172,13 @@ func runTestTool(exePath string) Tool {
 				"secret_env":      secretEnvSchema,
 				"junit_path":      map[string]any{"type": "string", "description": "also write a JUnit XML file here: each threshold, check and the baseline gate is one test case"},
 				"max_regression":  map[string]any{"type": "number", "description": "with baseline_path: how many percent worse than the baseline p95 and error rate may be (default 0: any increase fails)"},
+				"live":            map[string]any{"type": "boolean", "description": "show the run in the live view even when CI is set or stream_file or stream_push is given. The live view is already the default when none is given"},
+				"no-live":         map[string]any{"type": "boolean", "description": "do not stream to the live view or open a browser"},
+				"no-open":         map[string]any{"type": "boolean", "description": "stream to the live view but do not open a browser tab"},
+				"stream_file":     map[string]any{"type": "string", "description": "write the run as NDJSON events (vegaload.io/stream/v1) to this path, or \"auto\" for .vegaload/runs/<run id>.ndjson. Turns the live view off unless live is set"},
+				"stream_push":     map[string]any{"type": "string", "description": "ingest URL(s) to POST the run's events to, comma-separated. https unless the host is loopback. The Bearer token comes from VEGALOAD_STREAM_TOKEN in the server's environment, never from here. Turns the live view off unless live is set"},
+				"run_id":          map[string]any{"type": "string", "description": "the id used on stream events (A-Z a-z 0-9 . _ -, up to 64; default: random)"},
+				"labels":          map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "labels for every stream event, each \"key=value\""},
 			},
 		},
 		Handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
@@ -172,7 +198,9 @@ func runTestTool(exePath string) Tool {
 				reportPath = fmt.Sprintf("vegaload-mcp-report-%s.html", time.Now().Format("20060102-150405.000"))
 			}
 
-			args := []string{"run", "-output", "json", "-trigger", "mcp", "-no-open"}
+			// No -no-open: the live view opens its page as `vegaload run` does from a
+			// terminal. `-trigger mcp` keeps the HTML report from opening as well.
+			args := []string{"run", "-output", "json", "-trigger", "mcp"}
 			if in.Executor != "" {
 				args = append(args, "-executor", in.Executor)
 			}
@@ -225,6 +253,7 @@ func runTestTool(exePath string) Tool {
 				args = append(args, "-junit", in.JUnitPath)
 			}
 			args = appendInputFlags(args, in.DataFiles, in.Env, in.SecretEnv)
+			args = appendStreamFlags(args, in)
 			if in.NoReport {
 				args = append(args, "-no-report")
 			} else if reportPath != "" {
@@ -234,7 +263,10 @@ func runTestTool(exePath string) Tool {
 				args = append(args, in.ScenarioPath) // positional: must come last, flag.Parse stops at the first non-flag argument
 			}
 
-			stdout, err := RunCLI(ctx, exePath, args...)
+			// stdout and stderr stay apart: stdout is the result JSON this tool
+			// parses, stderr holds notes (the live view's address among them)
+			// that go back as a second item and can never break the parsing.
+			stdout, stderr, err := RunCLISplit(ctx, exePath, args...)
 			// Exit 3 means the run finished but broke a threshold. That
 			// is a result the caller asked for, not a tool failure, so
 			// the structured result is returned with thresholds_passed
@@ -242,6 +274,10 @@ func runTestTool(exePath string) Tool {
 			var exitErr *exec.ExitError
 			breached := errors.As(err, &exitErr) && exitErr.ExitCode() == exitThresholdsBreached
 			if err != nil && !breached {
+				// A failed run reports both streams.
+				if so := strings.TrimSpace(string(stdout)); so != "" {
+					err = fmt.Errorf("%w\nstdout: %s", err, so)
+				}
 				return nil, err
 			}
 			var result report.Result
@@ -251,6 +287,9 @@ func runTestTool(exePath string) Tool {
 			out := map[string]any{"result": result}
 			if reportPath != "" {
 				out["report_path"] = reportPath
+			}
+			if notes := strings.TrimSpace(string(stderr)); notes != "" {
+				return WithNotes{Value: out, Notes: notes}, nil
 			}
 			return out, nil
 		},
@@ -647,6 +686,34 @@ var (
 	envSchema       = map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "names of environment variables the scenario may read as env.NAME. Scripts cannot see any other variable"}
 	secretEnvSchema = map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "like env, but the value is a secret and is removed from results, reports and logs. Use this for tokens and passwords"}
 )
+
+// appendStreamFlags forwards run_test's live view and streaming arguments to
+// the flags `vegaload run` has. It adds a flag only for an argument that was
+// given: without any, `run` does what it does from a terminal.
+func appendStreamFlags(args []string, in runTestArgs) []string {
+	if in.Live {
+		args = append(args, "-live")
+	}
+	if in.NoLive || in.NoLiveAlt {
+		args = append(args, "-no-live")
+	}
+	if in.NoOpen || in.NoOpenAlt {
+		args = append(args, "-no-open")
+	}
+	if in.StreamFile != "" {
+		args = append(args, "-stream-file", in.StreamFile)
+	}
+	if in.StreamPush != "" {
+		args = append(args, "-stream-push", in.StreamPush)
+	}
+	if in.RunID != "" {
+		args = append(args, "-run-id", in.RunID)
+	}
+	for _, l := range in.Labels {
+		args = append(args, "-label", l)
+	}
+	return args
+}
 
 func appendInputFlags(args, dataFiles, env, secretEnv []string) []string {
 	for _, d := range dataFiles {

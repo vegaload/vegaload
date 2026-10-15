@@ -26,3 +26,7 @@ vegaload-mcp-report-*.html
 /.claude/
 /_to_delete/
 /.mcp.json
+
+# Local-only: working notes that are not part of the repository.
+/docs/PENDING.md
+/.vegaload/

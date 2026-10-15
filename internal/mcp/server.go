@@ -245,14 +245,34 @@ func (s *Server) callTool(ctx context.Context, params json.RawMessage) (any, *rp
 	if err != nil {
 		return toolErrorResult(err.Error()), nil
 	}
+	notes := ""
+	if wn, ok := result.(WithNotes); ok {
+		result, notes = wn.Value, wn.Notes
+	}
 	text, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
 		return toolErrorResult(fmt.Sprintf("encoding result: %v", err)), nil
 	}
-	return map[string]any{
-		"content": []map[string]any{{"type": "text", "text": string(text)}},
-	}, nil
+	// The first item is always the result, alone, so a client that parses it
+	// is never handed a note. Notes come as a second item, only when there are some.
+	content := []map[string]any{{"type": "text", "text": string(text)}}
+	if notes != "" {
+		content = append(content, map[string]any{"type": "text", "text": notes})
+	}
+	return map[string]any{"content": content}, nil
 }
+
+// WithNotes is a tool result that carries notes for the person using the
+// agent: what the CLI wrote to stderr, such as `run`'s "live view: URL" line.
+// The server sends Value as the first text item and Notes as a second one.
+// Encoded as JSON (in tests and in `mcp eval`) it is just Value.
+type WithNotes struct {
+	Value any
+	Notes string
+}
+
+// MarshalJSON encodes the value alone.
+func (w WithNotes) MarshalJSON() ([]byte, error) { return json.Marshal(w.Value) }
 
 // toolErrorResult builds an MCP CallToolResult with isError: true — a
 // tool-level failure, reported to the LLM as normal content it can read

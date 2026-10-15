@@ -50,6 +50,8 @@ Run `vegaload protocols` to see the list, with the options and an example for ea
 | Feature | What it does | Status |
 | --- | --- | --- |
 | HTML report | One self-contained file. It opens offline. No server, no account, no telemetry | Available |
+| Live view | A run is shown live in the browser by default, through a live view service. Off with `-no-live`, in CI, and with `-stream-file` or `-stream-push`. It is the one thing that sends a run anywhere | Available |
+| Event stream | `-stream-file` and `-stream-push` write or send the run as NDJSON events, one point per second | Available |
 | JSON report | Machine-readable. Includes a section for each protocol | Available |
 | JUnit XML | Each threshold, check and baseline gate is one test case, so CI shows it natively | Available |
 | CI job summary | A summary on the GitHub Actions page | Available |

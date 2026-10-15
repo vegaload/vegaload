@@ -35,6 +35,17 @@ type Collector struct {
 	mu      sync.Mutex
 	start   time.Time
 	samples []sample
+	// maxBucket is the highest one-second bucket any sample started in, or
+	// -1 before the first sample. It is the last index Finish's time series
+	// has, which lets a live view know which buckets are left at the end
+	// without scanning every sample (see LiveBuckets).
+	maxBucket int64
+
+	// tracking is set once a live cursor exists. Only then are the starts of
+	// running iterations kept (inflight, guarded by mu, counts them by the
+	// bucket they started in), so a run with no live view pays nothing for it.
+	tracking atomic.Bool
+	inflight map[int64]int
 
 	// liveTotal/liveFailed mirror the counts in samples but are safe to
 	// read cheaply (no lock, no copy) while a run is still in progress —
@@ -71,7 +82,64 @@ type Collector struct {
 // NewCollector returns a Collector ready to record a run that is
 // starting now.
 func NewCollector() *Collector {
-	return &Collector{start: time.Now()}
+	return &Collector{start: time.Now(), maxBucket: -1}
+}
+
+// Start is the instant the run's clock started. Every offset in the series
+// (and in a live point) counts from it.
+func (c *Collector) Start() time.Time { return c.start }
+
+// Begin and End implement engine.IterationTracker. They keep the start of each
+// running iteration, only while a live cursor exists (see LiveBuckets), so the
+// cursor can hold a bucket back until the calls that started in it have ended.
+func (c *Collector) Begin(start time.Time) {
+	if !c.tracking.Load() {
+		return
+	}
+	idx := int64(start.Sub(c.start) / bucketWidth)
+	c.mu.Lock()
+	if c.inflight == nil {
+		c.inflight = map[int64]int{}
+	}
+	c.inflight[idx]++
+	c.mu.Unlock()
+}
+
+// End undoes the Begin made with the same start. The engine calls it after the
+// iteration was recorded.
+func (c *Collector) End(start time.Time) {
+	if !c.tracking.Load() {
+		return
+	}
+	idx := int64(start.Sub(c.start) / bucketWidth)
+	c.mu.Lock()
+	if n := c.inflight[idx]; n > 1 {
+		c.inflight[idx] = n - 1
+	} else {
+		delete(c.inflight, idx)
+	}
+	c.mu.Unlock()
+}
+
+// runningThrough reports whether an iteration that started in bucket idx or an
+// earlier one is still running.
+func (c *Collector) runningThrough(idx int64) bool {
+	running, _ := c.liveState(idx)
+	return running
+}
+
+// liveState is runningThrough plus the highest bucket a recorded call started
+// in (-1 when there is none), read together.
+func (c *Collector) liveState(idx int64) (running bool, last int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for k := range c.inflight {
+		if k <= idx {
+			running = true
+			break
+		}
+	}
+	return running, c.maxBucket
 }
 
 // Record implements engine.Recorder.
@@ -83,6 +151,9 @@ func (c *Collector) Record(r engine.IterationResult) {
 	}
 	c.mu.Lock()
 	c.samples = append(c.samples, s)
+	if idx := int64(s.offset / bucketWidth); idx > c.maxBucket {
+		c.maxBucket = idx
+	}
 	c.mu.Unlock()
 
 	c.liveTotal.Add(1)

@@ -45,6 +45,11 @@ type Entry struct {
 	// DataFiles is the name and row count of each data file a protocol
 	// run read. A cell is never recorded.
 	DataFiles []DataFile `json:"data_files,omitempty"`
+
+	// Stream names where a streamed run was sent, as kinds and hosts:
+	// "file", "push:HOST" and "live:HOST", comma-separated. It never holds a
+	// path, a URL path or query, a project id or a token.
+	Stream string `json:"stream,omitempty"`
 }
 
 // DataFile is one data file. Name is the file's base name.

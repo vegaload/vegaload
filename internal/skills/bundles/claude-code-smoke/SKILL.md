@@ -44,3 +44,11 @@ tools are all you need here:
 5. If there were failures, call **diagnose_failure** and report what it says.
 6. If the user wants more than a smoke test, such as more users, a longer
    run, or pass/fail gates, switch to the `vegaload` skill.
+
+## The live view
+
+A `run_test` is also shown live in the user's browser by default (the live view):
+the page opens by itself, and its address comes back as `live view: URL`, the
+second text item of the result (the first is always the result JSON). After you
+start a run, tell the user that URL. Pass `no-live` only if they do not want it,
+and `no-open` to keep it from opening a browser tab. It is off in CI.

@@ -108,3 +108,11 @@ couldn't also do.
 Report numbers back to the user plainly (total requests, failure rate, p95
 latency) rather than dumping the raw JSON, and mention the HTML report path
 so they can open it themselves.
+
+## The live view
+
+A `run_test` is also shown live in the user's browser by default (the live view):
+the page opens by itself, and its address comes back as `live view: URL`, the
+second text item of the result (the first is always the result JSON). After you
+start a run, tell the user that URL. Pass `no-live` only if they do not want it,
+and `no-open` to keep it from opening a browser tab. It is off in CI.

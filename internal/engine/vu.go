@@ -19,12 +19,16 @@ import (
 // the executor level. A VU that never returns from iter will never
 // stop; protocol implementations are expected to respect ctx.
 func runVU(ctx context.Context, vuID int, iter IterationFunc, rec Recorder) {
+	tr, _ := rec.(IterationTracker)
 	for {
 		if runEnded(ctx) {
 			return
 		}
 
 		start := time.Now()
+		if tr != nil {
+			tr.Begin(start)
+		}
 		err := iter(ctx)
 		recordIteration(ctx, rec, IterationResult{
 			VUID:     vuID,
@@ -32,6 +36,10 @@ func runVU(ctx context.Context, vuID int, iter IterationFunc, rec Recorder) {
 			Duration: time.Since(start),
 			Err:      err,
 		})
+		if tr != nil {
+			// After Record, so the iteration is never in neither place.
+			tr.End(start)
+		}
 	}
 }
 

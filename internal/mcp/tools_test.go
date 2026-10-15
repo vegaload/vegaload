@@ -126,7 +126,7 @@ func TestRunTestTool_BuildsArgsAndParsesResult(t *testing.T) {
 	}
 
 	args := readArgs(t, argsFile)
-	for _, want := range []string{"-target", "https://example.com", "-protocol", "http1", "-vus", "5", "-duration", "10s", "-yes", "-trigger", "mcp", "-no-open"} {
+	for _, want := range []string{"-target", "https://example.com", "-protocol", "http1", "-vus", "5", "-duration", "10s", "-yes", "-trigger", "mcp"} {
 		if !containsArg(args, want) {
 			t.Errorf("args %v missing %q", args, want)
 		}
