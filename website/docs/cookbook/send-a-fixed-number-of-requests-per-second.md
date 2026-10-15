@@ -17,3 +17,16 @@ vegaload run -target http://127.0.0.1:8080/widgets -protocol http1 \
 
 `-rate` is iterations per second. `-max-vus` is the most users VegaLoad may
 use to keep that rate.
+
+## Make the rate climb, spike and fall
+
+A flat rate shows whether the target holds one level. To see how it behaves as the load changes, use `ramping-arrival-rate`. `-stages` are `rate:duration` pairs. The rate moves in a straight line from where it was to each target, starting from `-rate` (default 0):
+
+```sh
+vegaload run \
+  -executor ramping-arrival-rate -max-vus 200 \
+  -stages 50:4s,200:4s,600:3s,200:4s,50:3s \
+  scenario.vl.js
+```
+
+Like `constant-arrival-rate`, it keeps starting iterations on schedule even when the target slows down, and drops an arrival when `-max-vus` are all busy. `-cap-rate` applies to the highest rate in the stages.

@@ -39,7 +39,9 @@ couldn't also do.
 - **run_test** — run a load test, either a scenario file or a protocol-direct
   target (`target` + `protocol`, e.g. `http1`). Pick an `executor`: `fixed-vus`
   (steady concurrency), `ramp` (stages that climb then fall), `step` (stages
-  that jump), or `constant-arrival-rate` (fixed throughput via `rate`).
+  that jump), `constant-arrival-rate` (fixed throughput via `rate`), or
+  `ramping-arrival-rate` (throughput that climbs, spikes and falls: `stages` are
+  `rate:duration` pairs, plus `max_vus`).
   Returns a `report.Result` (total/failed/error_rate/latency percentiles/a
   per-second time series) and, unless `no_report` is set, a path to a
   self-contained HTML report you can open or point the user at. For a long

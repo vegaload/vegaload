@@ -68,12 +68,12 @@ Give a scenario file, or give `-target` and `-protocol` for a protocol-direct ru
 
 | Flag | Meaning |
 | --- | --- |
-| `-executor` | `fixed-vus` (default), `ramp`, `step` or `constant-arrival-rate`. |
+| `-executor` | `fixed-vus` (default), `ramp`, `step`, `constant-arrival-rate` or `ramping-arrival-rate`. |
 | `-vus` | Number of virtual users. Default `1`. For `ramp` and `step`, this is the size of the scripting pool. |
 | `-duration` | Run length for `fixed-vus` and `constant-arrival-rate`. Default `10s`. |
-| `-stages` | Stages for `ramp` and `step`, as `target:duration` pairs, for example `10:30s,0:10s`. |
-| `-rate` | Iterations per second, for `constant-arrival-rate`. |
-| `-max-vus` | Most users that may run at once, for `constant-arrival-rate`. |
+| `-stages` | Stages for `ramp`, `step` and `ramping-arrival-rate`, as `target:duration` pairs, for example `10:30s,0:10s`. The target is a VU count for `ramp` and `step`, and iterations per second for `ramping-arrival-rate`. |
+| `-rate` | Iterations per second, for `constant-arrival-rate`. For `ramping-arrival-rate` it is the rate the first stage starts from (default `0`). |
+| `-max-vus` | Most users that may run at once, for `constant-arrival-rate` and `ramping-arrival-rate`. |
 
 ### Pass and fail
 

@@ -55,7 +55,7 @@ Every stream ends with exactly one of `run.finished` or `run.failed`, including 
 | `vus` | integer | Fixed-vus: the user count. Ramp, step and arrival-rate: the peak (or `max-vus`). Optional. |
 | `rate` | number | Iterations per second, for `constant-arrival-rate`. Optional. |
 | `duration` | string | Planned length, a Go duration such as `30s`. |
-| `stages` | array | `{ "target": 10, "duration": "30s" }` for ramp and step. Optional. |
+| `stages` | array | `{ "target": 10, "duration": "30s" }` for ramp, step and ramping-arrival-rate (there the target is iterations per second, and `rate` is the highest of them). Optional. |
 | `target` | object | `{ "protocol": "http", "baseUrl": "https://host:port/path" }`. Protocol-direct mode only. Credentials (userinfo) and the query string are removed. |
 | `thresholds` | array | The pass/fail limits: `{ "name", "metric", "operator", "value", "step"?, "protocol"?, "op"? }`, as the run was given them. |
 | `abortOnBreach` | boolean | True with `-abort-on-breach`. |

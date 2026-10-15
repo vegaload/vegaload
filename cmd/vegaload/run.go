@@ -121,7 +121,7 @@ type runConfig struct {
 	// callRecorder is where scripted VUs and -protocol mode report each call.
 	callRecorder netapi.CallRecorder
 
-	Executor string // fixed-vus, ramp, step, constant-arrival-rate
+	Executor string // fixed-vus, ramp, step, constant-arrival-rate, ramping-arrival-rate
 	VUs      int
 	Duration time.Duration
 	Stages   []engine.Stage
@@ -212,12 +212,12 @@ func parseRunArgs(args []string) (*runConfig, error) {
 	var thresholdExprs repeatedFlags
 	var thresholdsFile string
 
-	fs.StringVar(&cfg.Executor, "executor", "fixed-vus", "load shape: fixed-vus, ramp, step, constant-arrival-rate")
+	fs.StringVar(&cfg.Executor, "executor", "fixed-vus", "load shape: fixed-vus, ramp, step, constant-arrival-rate, ramping-arrival-rate")
 	fs.IntVar(&cfg.VUs, "vus", 1, "number of virtual users (fixed-vus; also the scripting VU pool size for ramp/step)")
 	fs.DurationVar(&cfg.Duration, "duration", 10*time.Second, "run duration (fixed-vus, constant-arrival-rate)")
 	fs.StringVar(&stagesRaw, "stages", "", "comma-separated target:duration stages for ramp/step, e.g. 10:30s,0:10s")
-	fs.Float64Var(&cfg.Rate, "rate", 0, "iterations per second (constant-arrival-rate)")
-	fs.IntVar(&cfg.MaxVUs, "max-vus", 0, "max concurrent VUs (constant-arrival-rate)")
+	fs.Float64Var(&cfg.Rate, "rate", 0, "iterations per second (constant-arrival-rate); the starting rate of -stages for ramping-arrival-rate (default 0)")
+	fs.IntVar(&cfg.MaxVUs, "max-vus", 0, "max concurrent VUs (constant-arrival-rate, ramping-arrival-rate)")
 	fs.StringVar(&cfg.Target.URL, "target", "", "target URL or host:port (protocol-direct mode; omit if a scenario file is given)")
 	fs.StringVar(&cfg.Protocol, "protocol", "", protocolList()+" (protocol-direct mode)")
 	fs.StringVar(&method, "method", "", "HTTP verb, or the full gRPC method (e.g. /package.Service/Method)")
@@ -234,7 +234,7 @@ func parseRunArgs(args []string) (*runConfig, error) {
 	cfg.Limits = safety.DefaultLimits
 	fs.IntVar(&cfg.Limits.MaxVUs, "cap-vus", safety.DefaultLimits.MaxVUs, "hard cap on virtual users for this run")
 	fs.DurationVar(&cfg.Limits.MaxDuration, "cap-duration", safety.DefaultLimits.MaxDuration, "hard cap on run duration")
-	fs.Float64Var(&cfg.Limits.MaxRate, "cap-rate", safety.DefaultLimits.MaxRate, "hard cap on iterations/sec (constant-arrival-rate)")
+	fs.Float64Var(&cfg.Limits.MaxRate, "cap-rate", safety.DefaultLimits.MaxRate, "hard cap on iterations/sec (constant-arrival-rate, ramping-arrival-rate)")
 
 	// FR-CLI-07: audit log.
 	fs.StringVar(&cfg.Trigger, "trigger", "cli", "what started this run, recorded in the audit log (e.g. \"cli\", or \"mcp:<session-id>\")")
@@ -402,7 +402,7 @@ func parseStages(s string) ([]engine.Stage, error) {
 		}
 		target, err := strconv.Atoi(strings.TrimSpace(targetStr))
 		if err != nil {
-			return nil, fmt.Errorf("stage %q: invalid target VU count: %w", p, err)
+			return nil, fmt.Errorf("stage %q: invalid target (a VU count, or iterations per second for ramping-arrival-rate): %w", p, err)
 		}
 		dur, err := time.ParseDuration(strings.TrimSpace(durStr))
 		if err != nil {
@@ -433,8 +433,16 @@ func buildExecutor(cfg *runConfig) (engine.Executor, error) {
 			return nil, fmt.Errorf("-executor constant-arrival-rate requires -rate > 0")
 		}
 		return engine.ConstantArrivalRate{Rate: cfg.Rate, Dur: cfg.Duration, MaxVUs: cfg.MaxVUs}, nil
+	case "ramping-arrival-rate":
+		if len(cfg.Stages) == 0 {
+			return nil, fmt.Errorf("-executor ramping-arrival-rate requires -stages (target:duration pairs; the target is iterations per second)")
+		}
+		if cfg.Rate < 0 {
+			return nil, fmt.Errorf("-rate %g: want zero or more (it is the starting rate of -stages)", cfg.Rate)
+		}
+		return engine.RampingArrivalRate{StartRate: cfg.Rate, Stages: cfg.Stages, MaxVUs: cfg.MaxVUs}, nil
 	default:
-		return nil, fmt.Errorf("unknown -executor %q (want fixed-vus, ramp, step, or constant-arrival-rate)", cfg.Executor)
+		return nil, fmt.Errorf("unknown -executor %q (want fixed-vus, ramp, step, constant-arrival-rate, or ramping-arrival-rate)", cfg.Executor)
 	}
 }
 
@@ -444,7 +452,7 @@ func buildExecutor(cfg *runConfig) (engine.Executor, error) {
 // grows past it (closing the overflow on return) rather than blocking.
 func concurrencyHint(cfg *runConfig) int {
 	switch cfg.Executor {
-	case "constant-arrival-rate":
+	case "constant-arrival-rate", "ramping-arrival-rate":
 		if cfg.MaxVUs > 0 {
 			return cfg.MaxVUs
 		}
@@ -822,14 +830,26 @@ func applyBaseline(cfg *runConfig, result *report.Result) {
 // known until the script actually runs, unlike -target here.
 func enforceSafety(cfg *runConfig, in io.Reader, out io.Writer, confirm func(io.Reader, io.Writer, string) bool) error {
 	rate := cfg.Rate
-	if err := safety.CheckLimits(cfg.VUs, cfg.Duration, rate, cfg.Limits); err != nil {
+	dur := cfg.Duration
+	if cfg.Executor == "ramping-arrival-rate" {
+		// The stages carry the rates and the length of this shape: the cap
+		// applies to the highest rate it reaches and to its total duration.
+		dur = 0
+		for _, s := range cfg.Stages {
+			dur += s.Duration
+			if float64(s.Target) > rate {
+				rate = float64(s.Target)
+			}
+		}
+	}
+	if err := safety.CheckLimits(cfg.VUs, dur, rate, cfg.Limits); err != nil {
 		return err
 	}
 	// ramp/step can reach a higher VU count than -vus via -stages; check
 	// that too, using the same concurrency estimate the scripting pool
 	// is sized with.
 	if peak := concurrencyHint(cfg); peak > cfg.VUs {
-		if err := safety.CheckLimits(peak, cfg.Duration, rate, cfg.Limits); err != nil {
+		if err := safety.CheckLimits(peak, dur, rate, cfg.Limits); err != nil {
 			return err
 		}
 	}

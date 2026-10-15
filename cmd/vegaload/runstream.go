@@ -393,6 +393,16 @@ func buildRunStarted(cfg *runConfig, executor string, duration time.Duration) st
 	case "constant-arrival-rate":
 		rs.Rate = cfg.Rate
 		rs.VUs = cfg.MaxVUs
+	case "ramping-arrival-rate":
+		// Stage targets are iterations per second here; rate is the highest.
+		rs.VUs = cfg.MaxVUs
+		rs.Rate = cfg.Rate
+		for _, s := range cfg.Stages {
+			if float64(s.Target) > rs.Rate {
+				rs.Rate = float64(s.Target)
+			}
+			rs.Stages = append(rs.Stages, stream.Stage{Target: s.Target, Duration: s.Duration.String()})
+		}
 	case "ramp", "step":
 		rs.VUs = concurrencyHint(cfg)
 		for _, s := range cfg.Stages {

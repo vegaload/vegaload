@@ -33,7 +33,7 @@ If a proposed change breaks any of these three rules, stop and flag it instead o
 
 Keep these modules separate. Do not let one reach into another's internals.
 
-- **Core engine**: the VU scheduler and load-shape executors (fixed-VU, ramp, step, constant-arrival-rate). Knows nothing about MCP, reporting, or Harness RT.
+- **Core engine**: the VU scheduler and load-shape executors (fixed-VU, ramp, step, constant-arrival-rate, ramping-arrival-rate). Knows nothing about MCP, reporting, or Harness RT.
 - **Protocol drivers**: HTTP/1.1, HTTP/2, gRPC, WebSocket, MQTT, Kafka, PostgreSQL, MySQL, Redis, raw TCP and UDP. Each implements a shared `Protocol` interface. Adding a new protocol should never require editing the core engine.
 - **Importers**: `internal/har` turns a HAR recording into a scenario file. It only reads a recording and writes text. It must not import the engine, the drivers, or the scripting runtimes. `vegaload import` is the only command that uses it.
 - **Output/reporting**: the self-contained HTML report, plus optional JSON/Parquet export. Implements a shared `Output` interface.
