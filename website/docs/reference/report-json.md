@@ -76,6 +76,8 @@ The load generator's own load. When it cannot keep up, it starts calls late and 
 | `sched_latency_peak_p99_ns` | The highest one-second value of the same. |
 | `overloaded` | `true` when the run has the `generator overloaded:` warning: the CPU was at 90% or more for 3 seconds or more, goroutines waited 20 ms or more to run (p99) for 3 seconds or more, or more than 1% of the planned iterations were dropped. |
 
+In a merged report each generator was its own machine, so `generator` holds the highest value of each field across the merged runs, and `overloaded` is `true` when any of them was.
+
 ## `failure_reasons[]`
 
 | Field | Meaning |

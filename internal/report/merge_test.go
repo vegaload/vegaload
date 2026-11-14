@@ -249,6 +249,20 @@ func TestMergeDropsPerFileVerdictsAndKeepsTheRest(t *testing.T) {
 		t.Errorf("schema %q", merged.Schema)
 	}
 
+	split[0].Generator = &GeneratorStats{CPUs: 4, CPUAvgPercent: 30, CPUPeakPercent: 95, SchedLatencyP99: time.Millisecond}
+	split[1].Generator = &GeneratorStats{CPUs: 8, CPUAvgPercent: 60, CPUPeakPercent: 70, SchedLatencyP99: 3 * time.Millisecond, Overloaded: true}
+	busy, err := Merge(split)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := GeneratorStats{CPUs: 8, CPUAvgPercent: 60, CPUPeakPercent: 95, SchedLatencyP99: 3 * time.Millisecond, Overloaded: true}
+	if busy.Generator == nil || *busy.Generator != want {
+		t.Errorf("generator %+v, want the busiest of each field %+v", busy.Generator, want)
+	}
+	if split[0].Generator.CPUs != 4 {
+		t.Errorf("merging changed an input's generator: %+v", split[0].Generator)
+	}
+
 	// A merged result merges again, and counts every run it came from.
 	again, err := Merge([]*Result{merged, split[0]})
 	if err != nil || again.MergedFrom != 3 || again.Total != merged.Total+split[0].Total {

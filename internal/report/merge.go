@@ -105,6 +105,7 @@ func Merge(rs []*Result) (*Result, error) {
 		if r.Aborted != nil {
 			aborted++
 		}
+		out.Generator = busiestGenerator(out.Generator, r.Generator)
 		for _, f := range r.DataFiles {
 			if !seenData[f] {
 				seenData[f] = true
@@ -238,6 +239,27 @@ func (o *ordered[V]) get(name string, mk func() V) V {
 		o.order = append(o.order, name)
 	}
 	return v
+}
+
+// busiestGenerator folds one generator's load into the merged one. Each
+// generator is its own machine, so a CPU share or a scheduling delay cannot
+// be added up: the merged report keeps the highest value of each, and is
+// overloaded when any generator was.
+func busiestGenerator(acc, g *GeneratorStats) *GeneratorStats {
+	if g == nil {
+		return acc
+	}
+	if acc == nil {
+		c := *g
+		return &c
+	}
+	acc.CPUs = max(acc.CPUs, g.CPUs)
+	acc.CPUAvgPercent = max(acc.CPUAvgPercent, g.CPUAvgPercent)
+	acc.CPUPeakPercent = max(acc.CPUPeakPercent, g.CPUPeakPercent)
+	acc.SchedLatencyP99 = max(acc.SchedLatencyP99, g.SchedLatencyP99)
+	acc.SchedLatencyPeakP99 = max(acc.SchedLatencyPeakP99, g.SchedLatencyPeakP99)
+	acc.Overloaded = acc.Overloaded || g.Overloaded
+	return acc
 }
 
 func appendNew(list []string, s string) []string {
