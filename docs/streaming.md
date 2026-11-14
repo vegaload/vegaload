@@ -74,7 +74,7 @@ One per second of the run, in order, covering the calls that started in that sec
 | `requests` | integer | Calls in the bucket. |
 | `failed` | integer | Failed calls in the bucket. |
 | `errorRate` | number | 0 to 1; `0` when `requests` is 0. |
-| `p50Ms`, `p95Ms`, `p99Ms` | number | Latency of the bucket's calls in ms; `0` when `requests` is 0. |
+| `p50Ms`, `p95Ms`, `p99Ms` | number | Latency of the bucket's calls in ms; `0` when `requests` is 0. Estimated from a histogram of the bucket's calls by the same rule as the report's percentiles (within 2.5% above 0.5 ms), also with `-exact-percentiles`. |
 | `total` | integer | Calls since the start, up to and including this bucket. |
 | `totalFailed` | integer | Failed calls since the start. |
 
@@ -98,7 +98,7 @@ The bucket width is the same one-second width as the final `time_series` in the 
 
 ### `run.finished`
 
-`data` is the run's structured result, exactly what `-out` writes (the `report.Result` JSON: `executor`, `started_at`, `elapsed_ns`, `total`, `failed`, `error_rate`, `latency`, `time_series`, and when present `warnings`, `generator`, `thresholds`, `thresholds_passed`, `aborted`, `baseline`, `steps`, `protocols`, `checks`, `data_files`), plus:
+`data` is the run's structured result, exactly what `-out` writes (the `report.Result` JSON: `schema`, `executor`, `started_at`, `elapsed_ns`, `total`, `failed`, `error_rate`, `latency`, `time_series`, and when present `warnings`, `generator`, `thresholds`, `thresholds_passed`, `aborted`, `baseline`, `steps`, `protocols`, `checks`, `data_files`), plus the fields below. Every latency block in it carries a `histogram` (see `website/docs/reference/report-json.md`). `schema` and `histogram` were added later; a reader that does not know them ignores them.
 
 | Field | Type | Notes |
 | --- | --- | --- |

@@ -134,40 +134,96 @@ func TestNFR03_ScenarioReportFor1MCallsWithin5Seconds(t *testing.T) {
 	}
 }
 
-// TestCallSamples_1MIterations5Calls checks the memory of the packed call
-// record. 1,000,000 iterations of 5 calls is 5,000,000 uint64 samples,
-// 40 MB of length. Slice capacity adds some overhead; the test logs the
-// heap so a review can see the number.
-func TestCallSamples_1MIterations5Calls(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping the call-sample memory check in -short mode")
-	}
+// heapAfterGC is the live heap, in bytes, once garbage is collected.
+func heapAfterGC() uint64 {
 	runtime.GC()
-	var before runtime.MemStats
-	runtime.ReadMemStats(&before)
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	return m.HeapAlloc
+}
 
-	c := NewCollector()
+// Memory stays flat as the request count grows. A run of
+// 10,000,000 requests holds about what it held after 1,000,000: every
+// latency is in a histogram and every count in a counter. The per-second
+// counters grow with a run's length, not its requests, so the requests
+// here all start inside the same ten minutes.
+func TestMemoryIsFlatFrom1MTo10MRequests(t *testing.T) {
+	const (
+		first = 1_000_000
+		total = 10_000_000
+		// The bound is a few histograms' worth: the buckets of the slowest
+		// latencies seen so far, a map entry or two, and GC noise.
+		bound = 512 << 10
+	)
 	ops := []string{"connect", "download", "upload", "list", "stat"}
-	for i := 0; i < nfr03Requests; i++ {
-		for _, op := range ops {
-			c.RecordCall("ftp", op, time.Millisecond, nil, 1, 1)
+	steps := []string{"login", "browse", "checkout"}
+
+	plain := NewCollector()
+	scenario := NewCollector()
+	scenario.RequestsFromCalls()
+	lb := scenario.LiveBuckets()
+	record := func(from, to int) {
+		for i := from; i < to; i++ {
+			d := time.Duration(1+(i*7919)%2000) * 100 * time.Microsecond
+			var err error
+			if i%97 == 0 {
+				err = os.ErrDeadlineExceeded
+			}
+			start := plain.start.Add(time.Duration(i%600) * time.Second)
+			plain.Record(engine.IterationResult{Start: start, Duration: d, Err: err})
+			scenario.RecordCall("ftp", ops[i%len(ops)], d, err, 10, 100)
+			if i%5 == 4 {
+				scenario.RecordMeasure("ftp", "connect_time", d/3)
+				scenario.RecordStep(steps[i%len(steps)], 5*d, err != nil)
+				scenario.Record(engine.IterationResult{Start: start, Duration: 5 * d})
+			}
+		}
+		for {
+			if _, ok := lb.Next(time.Since(scenario.start)+time.Hour, 0); !ok {
+				break
+			}
 		}
 	}
-	packed := c.callSampleBytes()
-	runtime.GC()
-	var after runtime.MemStats
-	runtime.ReadMemStats(&after)
-	heap := after.HeapInuse - before.HeapInuse
-	t.Logf("5,000,000 calls: packed samples %d MB, heap in use grew %d MB", packed>>20, heap>>20)
 
-	const want = nfr03Requests * 5 * 8
-	if packed != want {
-		t.Fatalf("packed sample bytes = %d, want %d", packed, want)
+	record(0, first)
+	at1M := heapAfterGC()
+	record(first, total)
+	at10M := heapAfterGC()
+	runtime.KeepAlive(plain)
+	runtime.KeepAlive(scenario)
+
+	growth := int64(at10M) - int64(at1M)
+	t.Logf("live heap after 1,000,000 requests: %d KB; after 10,000,000: %d KB (grew %d KB, bound %d KB)",
+		at1M>>10, at10M>>10, growth>>10, bound>>10)
+	if growth > bound {
+		t.Errorf("the heap grew %d KB from 1M to 10M requests; it should stay flat (bound %d KB)", growth>>10, bound>>10)
 	}
-	res := c.Finish("fixed-vus", time.Second)
-	p, ok := res.Protocol("ftp")
-	if !ok || p.Total != nfr03Requests*5 || len(p.Operations) != 5 {
-		t.Fatalf("protocol = %+v ok %v", p.Name, ok)
+
+	res := plain.Finish("fixed-vus", 10*time.Minute)
+	if res.Total != total || len(res.TimeSeries) != 600 {
+		t.Fatalf("plain run: total %d, %d series points", res.Total, len(res.TimeSeries))
+	}
+	sres := scenario.Finish("fixed-vus", 10*time.Minute)
+	if sres.Total != total || sres.Iterations.Total != total/5 || len(sres.Steps) != 3 {
+		t.Fatalf("scenario run: total %d iterations %d steps %d", sres.Total, sres.Iterations.Total, len(sres.Steps))
+	}
+	if p, ok := sres.Protocol("ftp"); !ok || p.Total != total || len(p.Operations) != 5 || p.Measures[0].Count != total/5 {
+		t.Fatalf("ftp = %+v", p)
+	}
+}
+
+// In exact mode the collector keeps every latency, so memory grows with
+// the requests. This is the cost -exact-percentiles documents.
+func TestExactModeKeepsEveryLatency(t *testing.T) {
+	c := NewCollectorWith(Options{Exact: true})
+	before := heapAfterGC()
+	for i := 0; i < 1_000_000; i++ {
+		c.Record(engine.IterationResult{Start: c.start, Duration: time.Duration(1+i%400) * time.Millisecond})
+	}
+	grew := int64(heapAfterGC()) - int64(before)
+	runtime.KeepAlive(c)
+	if grew < 8_000_000 {
+		t.Fatalf("exact mode grew the heap by only %d bytes for 1,000,000 latencies", grew)
 	}
 }
 

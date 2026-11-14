@@ -1,14 +1,16 @@
 package report
 
 import (
-	"sort"
 	"time"
+
+	"github.com/vegaload/vegaload/internal/hist"
 )
 
 // BucketStat is what one one-second bucket of a run holds: the calls that
 // started in that second. Requests, Failed, RPS and ErrorRate are the same
 // numbers as the matching Point of Result.TimeSeries, worked out the same way.
-// The latency percentiles use the same nearest-rank rule as Finish.
+// The latency percentiles are estimated from a histogram of the bucket's
+// calls, by the same rule as Finish (see hist.Histogram.Percentile).
 type BucketStat struct {
 	Offset      time.Duration // start of the bucket
 	Requests    int64
@@ -33,16 +35,11 @@ type BucketStat struct {
 // freeze a live view. The final Result.TimeSeries stays authoritative.
 const LiveMaxHold = 10 * time.Second
 
-// liveScanSlack is how far back in time the scan for a bucket's calls goes
-// beyond the bucket's start. Samples are appended as the iterations end, in an
-// order that is only roughly the order they ended in; a second is far more
-// than that disorder.
-const liveScanSlack = time.Second
-
 // LiveBuckets hands out the one-second buckets of a run that is still going,
-// in order, each exactly once. It reads the collector's samples without
-// copying them all: a bucket's calls are found by scanning back from the end
-// of the slice, which holds the newest.
+// in order, each exactly once. A bucket's counts are the final time series'
+// counters; its percentiles come from a histogram the collector keeps for
+// each second the cursor has not handed out yet, and drops as it does, so a
+// long run's memory stays flat.
 //
 // A call is recorded when it ends, but it belongs to the second it started in.
 // A bucket is therefore handed out only when its second has closed, a grace
@@ -68,8 +65,8 @@ type LiveBuckets struct {
 
 // LiveBuckets returns a cursor over the collector's buckets, from the first.
 // Use one cursor per run, from one goroutine. Creating it makes the collector
-// keep the start of every running iteration from then on, so create it before
-// the executor starts.
+// keep the start of every running iteration, and the latencies of each second,
+// from then on, so create it before the executor starts.
 func (c *Collector) LiveBuckets() *LiveBuckets {
 	c.tracking.Store(true)
 	return &LiveBuckets{c: c, maxHold: LiveMaxHold}
@@ -109,7 +106,7 @@ func (l *LiveBuckets) Next(now, grace time.Duration) (BucketStat, bool) {
 // so that the points and the final time series cover the same seconds.
 func (l *LiveBuckets) Rest() []BucketStat {
 	l.c.mu.Lock()
-	last := l.c.maxBucket
+	last := int64(len(l.c.secs)) - 1
 	l.c.mu.Unlock()
 	if last < l.next {
 		return nil
@@ -117,46 +114,42 @@ func (l *LiveBuckets) Rest() []BucketStat {
 	return l.take(l.next, last)
 }
 
-// take computes buckets from..to (both included) in one scan and advances the
-// cursor past them.
+// take computes buckets from..to (both included), drops their histograms, and
+// advances the cursor past them. A call recorded later for one of these
+// seconds still counts in the final series, but no histogram is kept for it.
 func (l *LiveBuckets) take(from, to int64) []BucketStat {
 	n := int(to - from + 1)
-	durs := make([][]time.Duration, n)
-	failed := make([]int64, n)
-
-	lo := time.Duration(from) * bucketWidth
-	hi := time.Duration(to+1) * bucketWidth
+	counts := make([]bucketAccum, n)
+	hists := make([]*hist.Histogram, n)
 	c := l.c
 	c.mu.Lock()
-	for j := len(c.samples) - 1; j >= 0; j-- {
-		s := c.samples[j]
-		if s.offset+s.dur < lo-liveScanSlack {
-			break
+	for k := 0; k < n; k++ {
+		idx := from + int64(k)
+		if idx < int64(len(c.secs)) {
+			counts[k] = c.secs[idx]
 		}
-		if s.offset < lo || s.offset >= hi {
-			continue
+		if h, ok := c.liveHists[idx]; ok {
+			hists[k] = h
+			delete(c.liveHists, idx)
 		}
-		k := int(int64(s.offset/bucketWidth) - from)
-		durs[k] = append(durs[k], s.dur)
-		if s.failed {
-			failed[k]++
-		}
+	}
+	if to+1 > c.liveNext {
+		c.liveNext = to + 1
 	}
 	c.mu.Unlock()
 
 	out := make([]BucketStat, n)
 	for k := 0; k < n; k++ {
-		d := durs[k]
-		sort.Slice(d, func(a, b int) bool { return d[a] < d[b] })
+		a := counts[k]
 		b := BucketStat{
-			Offset:   time.Duration(from+int64(k)) * bucketWidth,
-			Requests: int64(len(d)),
-			Failed:   failed[k],
-			RPS:      float64(len(d)) / bucketWidth.Seconds(),
+			Offset:    time.Duration(from+int64(k)) * bucketWidth,
+			Requests:  a.count,
+			Failed:    a.failed,
+			RPS:       float64(a.count) / bucketWidth.Seconds(),
+			ErrorRate: rateOf(a.failed, a.count),
 		}
-		if len(d) > 0 {
-			b.ErrorRate = float64(failed[k]) / float64(len(d))
-			b.P50, b.P95, b.P99 = percentile(d, 50), percentile(d, 95), percentile(d, 99)
+		if h := hists[k]; h != nil {
+			b.P50, b.P95, b.P99 = h.Percentile(50), h.Percentile(95), h.Percentile(99)
 		}
 		l.total += b.Requests
 		l.failed += b.Failed

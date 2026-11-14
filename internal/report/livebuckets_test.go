@@ -12,8 +12,10 @@ import (
 var errLive = errors.New("failed")
 
 // feed records a deterministic run of seconds one-second buckets. Second 3 has
-// no calls at all; every fourth call fails.
-func feedLive(c *Collector, seconds int) {
+// no calls at all; every fourth call fails. It returns the durations of each
+// second's calls.
+func feedLive(c *Collector, seconds int) [][]time.Duration {
+	bySec := make([][]time.Duration, seconds)
 	for sec := 0; sec < seconds; sec++ {
 		if sec == 3 {
 			continue
@@ -24,21 +26,24 @@ func feedLive(c *Collector, seconds int) {
 			if k%4 == 3 {
 				err = errLive
 			}
+			d := time.Duration((k*13+sec*5)%90+10) * time.Millisecond
+			bySec[sec] = append(bySec[sec], d)
 			c.Record(engine.IterationResult{
 				VUID:     k,
 				Start:    c.start.Add(time.Duration(sec)*time.Second + time.Duration(k)*7*time.Millisecond),
-				Duration: time.Duration((k*13+sec*5)%90+10) * time.Millisecond,
+				Duration: d,
 				Err:      err,
 			})
 		}
 	}
+	return bySec
 }
 
 func TestLiveBucketsMatchTheFinalTimeSeries(t *testing.T) {
 	c := NewCollector()
+	lb := c.LiveBuckets()
 	feedLive(c, 7)
 
-	lb := c.LiveBuckets()
 	var live []BucketStat
 	// Walk a clock past the end of the run: each bucket is due once, in order.
 	for now := time.Duration(0); now < 10*time.Second; now += 100 * time.Millisecond {
@@ -87,26 +92,49 @@ func TestLiveBucketsMatchTheFinalTimeSeries(t *testing.T) {
 
 func TestLiveBucketPercentilesUseTheSameRuleAsFinish(t *testing.T) {
 	c := NewCollector()
-	feedLive(c, 5)
 	lb := c.LiveBuckets()
+	bySec := feedLive(c, 5)
 	got := lb.take(0, 4)
 
 	for sec := 0; sec < 5; sec++ {
-		var d []time.Duration
-		for _, s := range c.samples {
-			if int(s.offset/time.Second) == sec {
-				d = append(d, s.dur)
-			}
-		}
-		sort.Slice(d, func(i, j int) bool { return d[i] < d[j] })
+		d := bySec[sec]
 		if len(d) == 0 {
+			if got[sec].P50 != 0 || got[sec].P99 != 0 {
+				t.Fatalf("an empty second has percentiles: %+v", got[sec])
+			}
 			continue
 		}
-		if got[sec].P50 != percentile(d, 50) || got[sec].P95 != percentile(d, 95) || got[sec].P99 != percentile(d, 99) {
-			t.Fatalf("second %d percentiles %v %v %v, want %v %v %v", sec,
-				got[sec].P50, got[sec].P95, got[sec].P99, percentile(d, 50), percentile(d, 95), percentile(d, 99))
+		// Each second's percentiles are the ones Finish would give a run of
+		// just that second's calls, and close to the exact ones.
+		one := NewCollector()
+		for _, v := range d {
+			one.Record(engine.IterationResult{Start: one.start, Duration: v})
+		}
+		want := one.Finish("fixed-vus", time.Second).Latency
+		if got[sec].P50 != want.P50 || got[sec].P95 != want.P95 || got[sec].P99 != want.P99 {
+			t.Fatalf("second %d percentiles %v %v %v, Finish gives %v %v %v", sec,
+				got[sec].P50, got[sec].P95, got[sec].P99, want.P50, want.P95, want.P99)
+		}
+		sort.Slice(d, func(i, j int) bool { return d[i] < d[j] })
+		for _, pair := range [][2]time.Duration{{got[sec].P50, percentile(d, 50)}, {got[sec].P95, percentile(d, 95)}, {got[sec].P99, percentile(d, 99)}} {
+			if !withinHistError(pair[0], pair[1]) {
+				t.Fatalf("second %d: %v is not within 2.5%% of the exact %v", sec, pair[0], pair[1])
+			}
 		}
 	}
+}
+
+// withinHistError says whether an estimated percentile is within the
+// histogram's error of the exact one.
+func withinHistError(got, exact time.Duration) bool {
+	if exact == 0 {
+		return got == 0
+	}
+	diff := got - exact
+	if diff < 0 {
+		diff = -diff
+	}
+	return float64(diff) <= 0.025*float64(exact)
 }
 
 // A call that is still running when its bucket is handed out is missing from
@@ -143,27 +171,46 @@ func TestLiveBucketsOfAnEmptyRun(t *testing.T) {
 	}
 }
 
-// The scan stays near the end of the samples: a long run does not make each
-// tick slower. This is a guard against copying or walking every sample.
-func TestLiveBucketScanStopsEarly(t *testing.T) {
+// A long run with a live view keeps a histogram only for the seconds the
+// cursor has not handed out: each is dropped as its second goes out, and a
+// late call for a second already handed out does not bring one back.
+func TestLiveBucketsKeepNoHistogramOnceHandedOut(t *testing.T) {
 	c := NewCollector()
+	lb := c.LiveBuckets()
+	most := 0
 	for sec := 0; sec < 600; sec++ {
 		for k := 0; k < 200; k++ {
 			c.Record(engine.IterationResult{Start: c.start.Add(time.Duration(sec)*time.Second + time.Duration(k)*time.Millisecond), Duration: time.Millisecond})
 		}
-	}
-	lb := c.LiveBuckets()
-	lb.next = 599
-	start := time.Now()
-	for i := 0; i < 1000; i++ {
-		lb.next = 599
-		lb.total, lb.failed = 0, 0
-		if got := lb.take(599, 599); got[0].Requests != 200 {
-			t.Fatalf("%+v", got[0])
+		for {
+			b, ok := lb.Next(time.Duration(sec+1)*time.Second, 0)
+			if !ok {
+				break
+			}
+			if b.Requests != 200 || b.P50 != time.Millisecond {
+				t.Fatalf("bucket %v: %+v", b.Offset, b)
+			}
 		}
+		most = max(most, len(c.liveHists))
 	}
-	if d := time.Since(start); d > 2*time.Second {
-		t.Fatalf("1000 scans of the last bucket of 120000 samples took %v", d)
+	if most > 2 {
+		t.Fatalf("kept up to %d per-second histograms at once", most)
+	}
+	c.Record(engine.IterationResult{Start: c.start.Add(10 * time.Second), Duration: time.Millisecond})
+	if len(c.liveHists) > 1 {
+		t.Fatalf("a late call kept a histogram for a second already handed out: %d kept", len(c.liveHists))
+	}
+	if _, ok := c.liveHists[10]; ok {
+		t.Fatal("a late call brought back the histogram of second 10")
+	}
+}
+
+// Without a live cursor, no per-second histogram is kept at all.
+func TestNoLiveHistogramsWithoutACursor(t *testing.T) {
+	c := NewCollector()
+	feedLive(c, 5)
+	if c.liveHists != nil {
+		t.Fatalf("kept %d per-second histograms with no live cursor", len(c.liveHists))
 	}
 }
 

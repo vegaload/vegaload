@@ -5,6 +5,7 @@ failed
 generator
 latency
 protocols
+schema
 started_at
 time_series
 total

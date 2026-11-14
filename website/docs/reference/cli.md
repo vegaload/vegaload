@@ -24,6 +24,7 @@ Every command takes `-output text` (the default) or `-output json`. `run` and `d
 | `import har` | Make a scenario from a browser recording. |
 | `diagnose` | Print environment info, or explain a JSON report. |
 | `compare` | Compare a candidate report with a baseline. |
+| `merge` | Combine JSON reports from several machines into one report. |
 | `protocols` | List the supported protocols, with their options. |
 | `init` | Set up the MCP server and agent rules for this project. |
 | `doctor` | Check that VegaLoad is installed and wired up. |
@@ -37,9 +38,9 @@ Every command takes `-output text` (the default) or `-output json`. `run` and `d
 | Code | `run` | Other commands |
 | --- | --- | --- |
 | 0 | The run finished. Thresholds, if any, passed. | Success. |
-| 1 | | `validate`: the scenario is not valid. `compare`: a regression. `doctor`: a check failed. `init -status`: something is missing. |
-| 2 | VegaLoad refused to start, for example a host that is not allowed. | `validate`: bad usage. |
-| 3 | A threshold or the baseline gate was breached. | |
+| 1 | | `validate`: the scenario is not valid. `compare`: a regression. `merge`: a report cannot be read or merged. `doctor`: a check failed. `init -status`: something is missing. |
+| 2 | VegaLoad refused to start, for example a host that is not allowed. | `validate`, `merge`: bad usage. |
+| 3 | A threshold or the baseline gate was breached. | `merge`: the merged result breached a threshold. |
 
 A run with no threshold exits 0 even if every call failed. See [Troubleshooting](../help/troubleshooting.md).
 
@@ -104,6 +105,7 @@ Threshold metrics are `p50`, `p90`, `p95`, `p99`, `mean`, `min`, `max`, `error_r
 | --- | --- |
 | `-output` | `text` (default), `json` or `jsonl`. |
 | `-out` | Also write the JSON summary to this path. See [JSON report](./report-json.md). |
+| `-exact-percentiles` | Keep every sample to compute exact percentiles. Without it, percentiles are estimated from histograms, within 2.5% for calls slower than 0.5 ms, and memory stays flat. With it, memory grows with the number of requests. Use it for small local runs. |
 | `-report` | Path for the HTML report. Default `vegaload-report-<timestamp>.html`. |
 | `-no-report` | Do not write the HTML report. |
 | `-no-open` | Open no browser tab: neither the HTML report nor the live view page. The live view still streams. Also `VEGALOAD_OPEN=off`. |
@@ -200,6 +202,24 @@ Prints the change in error rate, latency percentiles, totals and requests per se
 | `-output` | `text` or `json`. |
 
 See [Compare two runs](../guides/compare-runs.md).
+
+## `merge`
+
+```
+vegaload merge [flags] <report.json> <report.json> [...]
+```
+
+Combines two or more JSON reports from `run -out` into one report. Use it for runs that sent load at the same time from several machines. Counts and latency histograms are added. Every percentile and rate is worked out again from the sums. Each report's own thresholds, baseline and abort are not carried over. A report from before histograms existed is refused with exit 1.
+
+| Flag | Meaning |
+| --- | --- |
+| `-out` | Write the merged JSON report to this path. |
+| `-report` | Also write an HTML report of the merged result to this path. |
+| `-threshold` | A limit on the merged result, with the same syntax as `run`. Repeat the flag. A breach exits 3. |
+| `-thresholds` | A JSON file of thresholds, the same format as `run`. |
+| `-output` | `text` or `json`. |
+
+See [Merge results from several machines](../guides/merge-results.md).
 
 ## `diagnose`
 

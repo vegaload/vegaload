@@ -6,7 +6,7 @@ sidebar_position: 4
 
 # JSON report
 
-`vegaload run -out report.json` writes a JSON summary of the run. `vegaload compare`, `-baseline` and `vegaload diagnose` read this file.
+`vegaload run -out report.json` writes a JSON summary of the run. `vegaload compare`, `-baseline`, `vegaload diagnose` and `vegaload merge` read this file.
 
 All times are whole numbers of nanoseconds. Names end in `_ns`. A rate such as `error_rate` is a fraction: `0.02` is 2%.
 
@@ -16,7 +16,9 @@ Some sections appear only when they apply. This page was checked against real 0.
 
 | Field | Meaning |
 | --- | --- |
-| `executor` | The load shape, such as `fixed-vus`. |
+| `schema` | `vegaload.io/report/v2`: the latency blocks carry histograms. Older reports have no `schema` and no histograms. `compare` and `-baseline` read both. `merge` reads only reports with histograms. |
+| `merged_from` | How many runs `vegaload merge` combined into this report. Present only in a merged report. |
+| `executor` | The load shape, such as `fixed-vus`. A merged report of different shapes lists them, separated by commas. |
 | `started_at` | When the run started, as a UTC timestamp. |
 | `elapsed_ns` | How long the run took. |
 | `total` | Number of requests. In a `-protocol` run a request is one iteration. In a scenario run it is one call the scenario made. |
@@ -38,12 +40,28 @@ Some sections appear only when they apply. This page was checked against real 0.
 
 ## `latency`
 
-The same fields appear in `steps` and `protocols`.
+The same fields appear in `iterations.duration`, `steps`, `protocols`, their `operations` and their `measures`.
 
 | Field | Meaning |
 | --- | --- |
-| `min_ns`, `mean_ns`, `max_ns` | Fastest, average and slowest call. |
-| `p50_ns`, `p90_ns`, `p95_ns`, `p99_ns` | Percentiles. `p95_ns` means 95% of calls were this fast or faster. |
+| `min_ns`, `mean_ns`, `max_ns` | Fastest, average and slowest call. These are exact. |
+| `p50_ns`, `p90_ns`, `p95_ns`, `p99_ns` | Percentiles. `p95_ns` means 95% of calls were this fast or faster. They are estimated from `histogram`, within 2.5% of the exact value for calls slower than 0.5 ms. With `vegaload run -exact-percentiles` they are exact. |
+| `histogram` | The latency histogram the percentiles come from. `vegaload merge` adds these up. See below. |
+
+### `histogram`
+
+The buckets are the ones the Harness k6 load test runner uses. Bucket 0 holds calls of 0.5 ms or less. Bucket `i` holds calls slower than 0.5 ms × 1.05<sup>i-1</sup> and up to 0.5 ms × 1.05<sup>i</sup>. Each bucket is 5% wider than the one before.
+
+| Field | Meaning |
+| --- | --- |
+| `base_ms` | `0.5`, the top of bucket 0. |
+| `growth` | `1.05`, how much wider each bucket is than the one before. |
+| `count` | How many calls the histogram holds. |
+| `sum_ns` | The exact total of their latencies. |
+| `min_ns`, `max_ns` | The exact fastest and slowest. |
+| `counts` | Calls per bucket, keyed by the bucket number as text, such as `{"62": 18, "63": 40}`. Empty buckets are left out. |
+
+A percentile is the bucket's geometric middle (0.5 ms × 1.05<sup>i-0.5</sup>), kept between `min_ns` and `max_ns`. The fastest and slowest are `min_ns` and `max_ns` themselves. In bucket 0 the estimate is spread between `min_ns` and 0.5 ms.
 
 ## `generator`
 
@@ -129,6 +147,7 @@ An iteration is one run of the scenario's default function (or `iteration()` in 
 | `bytes_sent`, `bytes_received` | Bytes moved. |
 | `bytes_per_second` | Throughput. |
 | `operations[]` | One entry per kind of call, such as `GET`. Each has `name`, `total`, `failed`, `error_rate`, `latency`, `bytes_sent` and `bytes_received`. |
+| `measures[]` | Phase times inside the protocol, such as ftp `connect_time`. Each has `name`, `count` and `latency`. Present when the protocol records them. |
 
 ## `checks[]`
 
@@ -144,14 +163,24 @@ A short run with one step and one check, trimmed:
 
 ```json
 {
+  "schema": "vegaload.io/report/v2",
   "executor": "fixed-vus",
   "total": 224,
   "failed": 0,
   "error_rate": 0,
-  "latency": { "p50_ns": 26642194, "p95_ns": 40212388 },
+  "latency": {
+    "min_ns": 14932404, "mean_ns": 27400874, "max_ns": 45250972,
+    "p50_ns": 26662316, "p95_ns": 37516557,
+    "histogram": { "base_ms": 0.5, "growth": 1.05, "count": 224,
+      "sum_ns": 6137795793, "min_ns": 14932404, "max_ns": 45250972,
+      "counts": { "70": 1, "71": 1, "73": 1, "74": 1, "75": 3, "76": 10,
+        "77": 10, "78": 12, "79": 24, "80": 20, "81": 21, "82": 17, "83": 25,
+        "84": 17, "85": 14, "86": 13, "87": 8, "88": 9, "89": 9, "90": 3,
+        "91": 1, "92": 2, "93": 2 } }
+  },
   "thresholds": [
     { "name": "p95 < 500ms", "metric": "p95", "operator": "<",
-      "value": "500ms", "observed": "40.22ms", "passed": true }
+      "value": "500ms", "observed": "37.52ms", "passed": true }
   ],
   "thresholds_passed": true,
   "steps": [{ "name": "list", "total": 224, "failed": 0 }],
@@ -159,4 +188,4 @@ A short run with one step and one check, trimmed:
 }
 ```
 
-To compare two reports, see [Compare two runs](../guides/compare-runs.md). To explain one, see [Explain a run](../guides/explain-a-run.md).
+To compare two reports, see [Compare two runs](../guides/compare-runs.md). To explain one, see [Explain a run](../guides/explain-a-run.md). To combine reports from several machines, see [Merge results](../guides/merge-results.md).

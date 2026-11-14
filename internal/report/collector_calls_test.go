@@ -2,9 +2,12 @@ package report
 
 import (
 	"encoding/json"
+	"sort"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/vegaload/vegaload/internal/engine"
 )
 
 func TestRecordCall_CountsOrderBytesAndPercentiles(t *testing.T) {
@@ -37,7 +40,7 @@ func TestRecordCall_CountsOrderBytesAndPercentiles(t *testing.T) {
 		t.Fatalf("bytes/s = %v", p.BytesPerSec)
 	}
 	// 10 samples at 1ms then 10 at 100ms. Nearest rank: index (p*20)/100.
-	if p.Latency.P50 != 100*time.Millisecond || p.Latency.P95 != 100*time.Millisecond {
+	if !withinHistError(p.Latency.P50, 100*time.Millisecond) || p.Latency.P95 != 100*time.Millisecond {
 		t.Fatalf("protocol latency p50 %s p95 %s", p.Latency.P50, p.Latency.P95)
 	}
 	if p.Operations[0].Name != "query" || p.Operations[0].Latency.P50 != time.Millisecond {
@@ -45,6 +48,41 @@ func TestRecordCall_CountsOrderBytesAndPercentiles(t *testing.T) {
 	}
 	if p.Operations[1].Name != "exec" || p.Operations[1].Latency.P95 != 100*time.Millisecond {
 		t.Fatalf("exec op = %+v", p.Operations[1])
+	}
+	if p.Latency.Histogram == nil || p.Latency.Histogram.Count() != 20 || p.Operations[0].Latency.Histogram.Count() != 10 {
+		t.Fatal("every latency block carries its histogram")
+	}
+}
+
+// In exact mode every latency block's percentiles are the exact nearest-rank
+// values, and the histograms are still there for merge.
+func TestExactModeGivesExactPercentiles(t *testing.T) {
+	c := NewCollectorWith(Options{Exact: true})
+	c.RequestsFromCalls()
+	var all []time.Duration
+	for i := 0; i < 1000; i++ {
+		d := time.Duration(1000+i*37%9000) * time.Microsecond
+		all = append(all, d)
+		c.RecordCall("http", "GET", d, nil, 0, 0)
+		c.RecordStep("s", d, false)
+		c.RecordMeasure("http", "ttfb", d)
+		c.Record(engine.IterationResult{Start: c.start, Duration: d})
+	}
+	res := c.Finish("fixed-vus", time.Second)
+	sort.Slice(all, func(i, j int) bool { return all[i] < all[j] })
+	want := Latency{Min: all[0], Max: all[len(all)-1], P50: percentile(all, 50), P90: percentile(all, 90), P95: percentile(all, 95), P99: percentile(all, 99)}
+	p, _ := res.Protocol("http")
+	for name, got := range map[string]Latency{
+		"requests": res.Latency, "iterations": res.Iterations.Duration, "step": res.Steps[0].Latency,
+		"protocol": p.Latency, "operation": p.Operations[0].Latency, "measure": p.Measures[0].Latency,
+	} {
+		if got.Histogram == nil || got.Histogram.Count() != 1000 {
+			t.Errorf("%s: no histogram in exact mode", name)
+		}
+		got.Histogram, got.Mean = nil, 0
+		if got != want {
+			t.Errorf("%s = %+v, want the exact %+v", name, got, want)
+		}
 	}
 }
 
