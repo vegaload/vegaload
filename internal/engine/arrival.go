@@ -21,8 +21,8 @@ import (
 // If an iteration takes longer than the arrival interval, more than
 // one VU runs concurrently to keep up. MaxVUs caps how many will ever
 // run at once; an arrival that would exceed MaxVUs is dropped and
-// recorded as a failed iteration with VUID -1, rather than queued, so
-// a struggling target doesn't cause unbounded VU growth.
+// recorded with Dropped set (see IterationResult), rather than queued,
+// so a struggling target doesn't cause unbounded VU growth.
 type ConstantArrivalRate struct {
 	// Rate is the target number of iterations per second.
 	Rate float64
@@ -97,15 +97,7 @@ func (c ConstantArrivalRate) Run(ctx context.Context, iter IterationFunc, rec Re
 					}
 				}()
 			default:
-				// MaxVUs are all busy: drop this arrival rather than
-				// queue it, and record the drop so it is visible in
-				// results instead of silently missing.
-				rec.Record(IterationResult{
-					VUID:     -1,
-					Start:    tickTime,
-					Duration: 0,
-					Err:      fmt.Errorf("engine: dropped iteration, all %d VUs busy", maxVUs),
-				})
+				recordDrop(rec, tickTime)
 			}
 		}
 	}

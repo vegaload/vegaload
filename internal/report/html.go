@@ -37,12 +37,19 @@ func renderHTML(res *Result) string {
 	fmt.Fprintf(&b, "<div class=\"stat\"><span class=\"n\">%d</span><span class=\"l\">total</span></div>\n", res.Total)
 	fmt.Fprintf(&b, "<div class=\"stat\"><span class=\"n\">%d</span><span class=\"l\">failed</span></div>\n", res.Failed)
 	fmt.Fprintf(&b, "<div class=\"stat\"><span class=\"n\">%.2f%%</span><span class=\"l\">error rate</span></div>\n", errPct)
+	if res.DroppedIterations > 0 {
+		fmt.Fprintf(&b, "<div class=\"stat\"><span class=\"n\">%d</span><span class=\"l\">dropped iterations</span></div>\n", res.DroppedIterations)
+	}
 	fmt.Fprintf(&b, "</section>\n")
 
 	if a := res.Aborted; a != nil {
 		fmt.Fprintf(&b, "<p class=\"aborted\"><span class=\"badge fail\">ABORTED</span> The run was stopped at %s because <b>%s</b> was broken (observed %s).</p>\n",
 			a.At.Round(1e6), html.EscapeString(a.Threshold), html.EscapeString(a.Observed))
 	}
+	for _, w := range res.Warnings {
+		fmt.Fprintf(&b, "<p class=\"warning\"><span class=\"badge fail\">WARNING</span> %s</p>\n", html.EscapeString(w))
+	}
+	b.WriteString(failuresSection(res))
 	b.WriteString(dataFilesSection(res))
 	b.WriteString(thresholdsSection(res))
 	b.WriteString(baselineSection(res))
@@ -54,6 +61,7 @@ func renderHTML(res *Result) string {
 	fmt.Fprintf(&b, "<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>\n</table>\n</section>\n",
 		res.Latency.Min.Round(1e3), res.Latency.P50.Round(1e3), res.Latency.P90.Round(1e3),
 		res.Latency.P95.Round(1e3), res.Latency.P99.Round(1e3), res.Latency.Max.Round(1e3), res.Latency.Mean.Round(1e3))
+	b.WriteString(iterationsSection(res))
 
 	if len(res.TimeSeries) > 0 {
 		b.WriteString("<section class=\"charts\">\n<h2>Over time</h2>\n")
@@ -63,6 +71,44 @@ func renderHTML(res *Result) string {
 	}
 
 	b.WriteString("</main>\n</body></html>\n")
+	return b.String()
+}
+
+// failuresSection lists how many requests failed for each reason, or
+// nothing when none failed.
+func failuresSection(res *Result) string {
+	if len(res.FailureReasons) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("<section class=\"failures\">\n<h2>Failures</h2>\n<table>\n<tr><th>reason</th><th>requests</th></tr>\n")
+	for _, fr := range res.FailureReasons {
+		fmt.Fprintf(&b, "<tr><td>%s</td><td>%d</td></tr>\n", html.EscapeString(fr.Reason), fr.Count)
+	}
+	b.WriteString("</table>\n</section>\n")
+	return b.String()
+}
+
+// iterationsSection is a scenario run's iterations, whose numbers differ
+// from the requests above: an iteration is the whole scenario function,
+// every call in it included. Other runs have none.
+func iterationsSection(res *Result) string {
+	it := res.Iterations
+	if it == nil {
+		return ""
+	}
+	word, cls := "PASS", "pass"
+	if it.Failed > 0 {
+		word, cls = "FAIL", "fail"
+	}
+	var b strings.Builder
+	b.WriteString("<section class=\"iterations\">\n<h2>Iterations</h2>\n")
+	b.WriteString("<p class=\"note\">The numbers above are each call the scenario made. An iteration is one run of the whole scenario function.</p>\n")
+	b.WriteString("<table>\n<tr><th>result</th><th>ran</th><th>failed</th><th>error rate</th><th>p50</th><th>p95</th><th>max</th><th>mean</th></tr>\n")
+	fmt.Fprintf(&b, "<tr><td><span class=\"badge %s\">%s</span></td><td>%d</td><td>%d</td><td>%.2f%%</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>\n",
+		cls, word, it.Total, it.Failed, it.ErrorRate*100,
+		it.Duration.P50.Round(1e3), it.Duration.P95.Round(1e3), it.Duration.Max.Round(1e3), it.Duration.Mean.Round(1e3))
+	b.WriteString("</table>\n</section>\n")
 	return b.String()
 }
 

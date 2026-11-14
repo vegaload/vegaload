@@ -18,6 +18,12 @@ vegaload run -target http://127.0.0.1:8080/widgets -protocol http1 \
 `-rate` is iterations per second. `-max-vus` is the most users VegaLoad may
 use to keep that rate.
 
+When every VU is busy, an arrival is dropped, not queued. A dropped iteration
+never ran, so it is not a failed request and is in no latency number. The
+summary shows it as `dropped:`, and the JSON as `dropped_iterations`. When more
+than 1% of the planned iterations were dropped, the run warns that the target
+got less load than you asked for. Raise `-max-vus` until the warning goes away.
+
 ## Make the rate climb, spike and fall
 
 A flat rate shows whether the target holds one level. To see how it behaves as the load changes, use `ramping-arrival-rate`. `-stages` are `rate:duration` pairs. The rate moves in a straight line from where it was to each target, starting from `-rate` (default 0):

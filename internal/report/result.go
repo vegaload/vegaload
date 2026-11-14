@@ -11,6 +11,11 @@ import (
 // renders, and the same shape FR-RPT-04 says the MCP get_results tool
 // (Phase 2) must return, so an agent host can render its own view from
 // exactly the same data a human reads in the HTML report.
+//
+// Total, Failed, ErrorRate, Latency and TimeSeries are the run's requests.
+// In a -protocol run a request is one iteration. In a scenario run it is
+// one protocol call the scenario made (an HTTP request, a query, a
+// publish), and the iterations are counted on their own in Iterations.
 type Result struct {
 	Executor  string        `json:"executor"`
 	StartedAt time.Time     `json:"started_at"`
@@ -19,6 +24,27 @@ type Result struct {
 	Failed    int64         `json:"failed"`
 	ErrorRate float64       `json:"error_rate"`
 	Latency   Latency       `json:"latency"`
+
+	// FailureReasons counts the failed requests by why they failed, such
+	// as "timeout" or "status 503" (see internal/failure), most first. It
+	// is omitted when no request failed.
+	FailureReasons []FailureReason `json:"failure_reasons,omitempty"`
+
+	// Iterations is how many times a scenario ran its iteration function,
+	// and how long a whole iteration took. It is set only for a scenario
+	// run; in a -protocol run an iteration is one request.
+	Iterations *IterationStats `json:"iterations,omitempty"`
+
+	// DroppedIterations counts the arrivals an arrival-rate executor could
+	// not start because every VU was busy. A dropped iteration never ran:
+	// it is not a request, so it is in no latency, count or error rate.
+	// It is omitted when nothing was dropped.
+	DroppedIterations int64 `json:"dropped_iterations,omitempty"`
+
+	// Warnings says what makes the numbers less trustworthy than they
+	// look, such as many dropped iterations. It is omitted when there is
+	// nothing to say.
+	Warnings []string `json:"warnings,omitempty"`
 	// TimeSeries is RPS and error rate bucketed by one-second intervals
 	// from the run's start (FR-RPT-01's "RPS over time" and "error rate
 	// over time"). It stays small regardless of request volume — one
@@ -88,6 +114,22 @@ type AbortInfo struct {
 	Observed string `json:"observed"`
 	// At is how far into the run it was stopped.
 	At time.Duration `json:"at_ns"`
+}
+
+// FailureReason is how many requests failed for one reason.
+type FailureReason struct {
+	Reason string `json:"reason"`
+	Count  int64  `json:"count"`
+}
+
+// IterationStats is a scenario run's iterations: how many ran, how many
+// ended in an error, and how long a whole iteration took, every call in it
+// included.
+type IterationStats struct {
+	Total     int64   `json:"total"`
+	Failed    int64   `json:"failed"`
+	ErrorRate float64 `json:"error_rate"`
+	Duration  Latency `json:"duration"`
 }
 
 // StepResult is one named step's totals across the whole run: how many

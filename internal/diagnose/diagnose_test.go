@@ -1,6 +1,7 @@
 package diagnose
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -103,6 +104,50 @@ func TestAnalyze_SpreadFailure(t *testing.T) {
 	if f.Transient {
 		t.Error("did not expect Transient when every bucket has the same error rate")
 	}
+}
+
+func TestAnalyze_DroppedIterations(t *testing.T) {
+	res := &report.Result{Total: 300, DroppedIterations: 100}
+	f := Analyze(res)
+	if !hasNote(f, "100 of 400 planned iterations (25.0%) were dropped") {
+		t.Errorf("no drop note: %v", f.Notes)
+	}
+	// A run where every arrival was dropped still says why.
+	f = Analyze(&report.Result{DroppedIterations: 5})
+	if !f.ZeroIterations || !hasNote(f, "5 of 5 planned iterations") {
+		t.Errorf("every arrival dropped: %+v", f)
+	}
+}
+
+func TestAnalyze_FailureReasonsAndIterations(t *testing.T) {
+	res := &report.Result{
+		Total: 100, Failed: 15, ErrorRate: 0.15,
+		FailureReasons: []report.FailureReason{{Reason: "status 503", Count: 12}, {Reason: "timeout", Count: 3}},
+		Iterations:     &report.IterationStats{Total: 50, Failed: 20, ErrorRate: 0.4},
+	}
+	f := Analyze(res)
+	if !hasNote(f, "failed requests by reason: 12 status 503, 3 timeout") {
+		t.Errorf("no reasons note: %v", f.Notes)
+	}
+	if !hasNote(f, "20 of 50 iterations failed (40.0%)") {
+		t.Errorf("no iterations note: %v", f.Notes)
+	}
+}
+
+func TestAnalyze_ScenarioWithoutCalls(t *testing.T) {
+	f := Analyze(&report.Result{Iterations: &report.IterationStats{Total: 8, Failed: 8, ErrorRate: 1}})
+	if !f.ZeroIterations || !hasNote(f, "ran 8 iterations (8 failed) but no protocol call was recorded") {
+		t.Errorf("findings = %+v", f)
+	}
+}
+
+func hasNote(f Findings, sub string) bool {
+	for _, n := range f.Notes {
+		if strings.Contains(n, sub) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestSuggestThresholds_RoundsUpAndFloors(t *testing.T) {

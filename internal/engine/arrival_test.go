@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 )
@@ -62,12 +63,62 @@ func TestConstantArrivalRate_DropsWhenVUsSaturated(t *testing.T) {
 
 	// With MaxVUs: 1 and iterations that stay busy throughout the run,
 	// only the first arrival should ever start; every later tick
-	// should be dropped and recorded as a failed iteration with VUID -1.
-	if rec.Total() < 2 {
-		t.Fatalf("Total() = %d, want at least 2 (the running one plus at least one drop)", rec.Total())
+	// should be dropped, and counted as a drop rather than a failure.
+	if rec.Total() != 1 {
+		t.Errorf("Total() = %d, want 1 (only the arrival that ran)", rec.Total())
 	}
-	if rec.Failed() == 0 {
-		t.Error("expected dropped iterations to be recorded as failures")
+	if rec.Dropped() == 0 {
+		t.Error("Dropped() = 0, want the arrivals that found every VU busy")
+	}
+	if rec.Failed() != 0 {
+		t.Errorf("Failed() = %d, want 0: a dropped arrival is not a failed iteration", rec.Failed())
+	}
+}
+
+func TestConstantArrivalRate_DropIsRecordedAsDropped(t *testing.T) {
+	rec := &resultRec{}
+	block := make(chan struct{})
+	c := ConstantArrivalRate{Rate: 200, Dur: 60 * time.Millisecond, MaxVUs: 1}
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		close(block)
+	}()
+	if err := c.Run(context.Background(), func(context.Context) error { <-block; return nil }, rec); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	checkDrops(t, rec)
+}
+
+// resultRec keeps every IterationResult it is given.
+type resultRec struct {
+	mu  sync.Mutex
+	all []IterationResult
+}
+
+func (r *resultRec) Record(res IterationResult) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.all = append(r.all, res)
+}
+
+// checkDrops asserts rec saw at least one drop, and that every drop has
+// the shape IterationResult documents: no duration, no error, VUID -1.
+func checkDrops(t *testing.T, rec *resultRec) {
+	t.Helper()
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	drops := 0
+	for _, r := range rec.all {
+		if !r.Dropped {
+			continue
+		}
+		drops++
+		if r.Duration != 0 || r.Err != nil || r.VUID != -1 || r.Start.IsZero() {
+			t.Errorf("drop = %+v, want VUID -1, a start time, no duration and no error", r)
+		}
+	}
+	if drops == 0 {
+		t.Fatalf("no drop recorded in %d results", len(rec.all))
 	}
 }
 

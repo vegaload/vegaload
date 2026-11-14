@@ -27,11 +27,14 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
 
+	"github.com/vegaload/vegaload/internal/failure"
+	"github.com/vegaload/vegaload/internal/protocol"
 	"github.com/vegaload/vegaload/internal/urlerr"
 )
 
@@ -70,9 +73,10 @@ type StepRecorder interface {
 // CallRecorder receives every call a script makes to a protocol, and every
 // call a protocol driver makes in -protocol mode. The report Collector
 // implements it. A nil recorder is allowed everywhere it is accepted, and
-// means the call still runs but is not counted.
+// means the call still runs but is not counted. err is why the call
+// failed, or nil when it worked; the recorder names the reason from it.
 type CallRecorder interface {
-	RecordCall(protocol, op string, d time.Duration, failed bool, sent, received int64)
+	RecordCall(protocol, op string, d time.Duration, err error, sent, received int64)
 	RecordMeasure(protocol, name string, d time.Duration)
 }
 
@@ -119,9 +123,46 @@ type SafetyCheck func(host string) error
 type Options struct {
 	Headers            map[string]string
 	InsecureSkipVerify bool
+	// ExpectedStatuses are the HTTP statuses that count as a success for
+	// this call. Nil means protocol.HTTPStatusOK's rule: 2xx and 3xx
+	// pass, 400 or higher fails. Check it with CheckExpectedStatuses.
+	// WebSocket ignores it.
+	ExpectedStatuses []int
 	// Recorder counts a WebSocket connect. Scripts do not set it. HTTP
 	// uses the recorder on HTTPClient instead.
 	Recorder CallRecorder
+}
+
+// CheckExpectedStatuses says what is wrong with a script's list of
+// expected HTTP statuses: an empty list (no answer could pass), or a
+// number that is not an HTTP status. A nil list is fine; it means the
+// default rule. The caller prefixes the option's name in its language.
+func CheckExpectedStatuses(statuses []int) error {
+	if statuses == nil {
+		return nil
+	}
+	if len(statuses) == 0 {
+		return fmt.Errorf("the list is empty, so no answer could pass; leave it out for the default (2xx and 3xx pass)")
+	}
+	for _, s := range statuses {
+		if s < 100 || s > 599 {
+			return fmt.Errorf("%d is not an HTTP status (want 100 to 599)", s)
+		}
+	}
+	return nil
+}
+
+// statusFailure is the failure of an HTTP answer with status code, or nil
+// when the call accepts that status.
+func statusFailure(code int, expected []int) error {
+	if expected == nil {
+		if protocol.HTTPStatusOK(code) {
+			return nil
+		}
+	} else if slices.Contains(expected, code) {
+		return nil
+	}
+	return failure.Status(code)
 }
 
 // ScriptHeaders is the header map a scenario sees. Keys keep Go's
@@ -187,9 +228,16 @@ func NewHTTPClient(check SafetyCheck, timeout time.Duration) *HTTPClient {
 // one-shot transport for this call rather than mutating the client's
 // shared one, since a script may hit several hosts with different TLS
 // needs across one iteration.
+//
+// An answer is returned whatever its status, so the script can read it.
+// A status the call does not accept (see Options.ExpectedStatuses) is
+// counted as a failed call, but is not an error here.
 func (c *HTTPClient) Do(ctx context.Context, method, rawURL string, body []byte, opts Options) (*HTTPResponse, error) {
 	if method == "" {
 		method = http.MethodGet
+	}
+	if err := CheckExpectedStatuses(opts.ExpectedStatuses); err != nil {
+		return nil, fmt.Errorf("netapi: expected statuses: %w", err)
 	}
 	if err := checkHost(c.check, rawURL); err != nil {
 		return nil, err
@@ -218,13 +266,17 @@ func (c *HTTPClient) Do(ctx context.Context, method, rawURL string, body []byte,
 	start := time.Now()
 	resp, err := client.Do(req)
 	if err != nil {
-		c.recordHTTP(ctx, method, time.Since(start), true, int64(len(body)), 0)
+		c.recordHTTP(ctx, method, time.Since(start), err, int64(len(body)), 0)
 		return nil, fmt.Errorf("netapi: %w", err)
 	}
 	defer resp.Body.Close()
 
 	data, err := io.ReadAll(resp.Body)
-	c.recordHTTP(ctx, method, time.Since(start), err != nil, int64(len(body)), int64(len(data)))
+	callErr := err
+	if callErr == nil {
+		callErr = statusFailure(resp.StatusCode, opts.ExpectedStatuses)
+	}
+	c.recordHTTP(ctx, method, time.Since(start), callErr, int64(len(body)), int64(len(data)))
 	if err != nil {
 		return nil, fmt.Errorf("netapi: reading response body: %w", err)
 	}
@@ -236,14 +288,14 @@ func (c *HTTPClient) Do(ctx context.Context, method, rawURL string, body []byte,
 	}, nil
 }
 
-func (c *HTTPClient) recordHTTP(ctx context.Context, method string, d time.Duration, failed bool, sent, received int64) {
+func (c *HTTPClient) recordHTTP(ctx context.Context, method string, d time.Duration, err error, sent, received int64) {
 	if c == nil || c.calls == nil {
 		return
 	}
-	if failed && RunEnded(ctx) {
+	if err != nil && RunEnded(ctx) {
 		return
 	}
-	c.calls.RecordCall("http", httpOp(method), d, failed, sent, received)
+	c.calls.RecordCall("http", httpOp(method), d, err, sent, received)
 }
 
 // httpOp keeps the operation set fixed. A verb outside the usual list is
@@ -335,7 +387,7 @@ func recordWS(rec CallRecorder, ctx context.Context, op string, d time.Duration,
 	if err != nil && RunEnded(ctx) {
 		return
 	}
-	rec.RecordCall("websocket", op, d, err != nil, sent, received)
+	rec.RecordCall("websocket", op, d, err, sent, received)
 }
 
 // Receive waits for the next message and returns its payload. closed is

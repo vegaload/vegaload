@@ -62,7 +62,7 @@ Give a scenario file, or give `-target` and `-protocol` for a protocol-direct ru
 | `-body` | The request body. |
 | `-opt` | A driver option, `key=value`. Repeat the flag. Each protocol has its own keys: see [Protocol options](./protocol-options.md). |
 | `-insecure` | Skip TLS certificate checks. |
-| `-timeout` | Time limit for one iteration. Default `30s`. |
+| `-timeout` | Time limit for each request: each `-protocol` call, or each call a scenario makes. A request that runs out of time fails with the reason `timeout`. Default `30s`. |
 
 ### Load shape
 

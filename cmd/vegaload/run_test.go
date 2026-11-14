@@ -16,6 +16,7 @@ import (
 
 	"github.com/vegaload/vegaload/internal/engine"
 	"github.com/vegaload/vegaload/internal/protocol"
+	"github.com/vegaload/vegaload/internal/report"
 	"github.com/vegaload/vegaload/internal/safety"
 )
 
@@ -195,11 +196,15 @@ func TestRunScenario_ScriptedJS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runScenario returned error: %v", err)
 	}
-	if result.Total == 0 {
-		t.Error("expected at least one recorded iteration")
+	if result.Iterations == nil || result.Iterations.Total == 0 {
+		t.Fatalf("Iterations = %+v, expected at least one recorded iteration", result.Iterations)
 	}
-	if result.Failed != 0 {
-		t.Errorf("Failed = %d, want 0 (run-end cancellations must not count as failures)", result.Failed)
+	if result.Iterations.Failed != 0 {
+		t.Errorf("Iterations.Failed = %d, want 0 (run-end cancellations must not count as failures)", result.Iterations.Failed)
+	}
+	// The scenario makes no call, so the run has no request.
+	if result.Total != 0 || result.Failed != 0 {
+		t.Errorf("Total = %d, Failed = %d, want 0 and 0 for a scenario that makes no call", result.Total, result.Failed)
 	}
 }
 
@@ -480,8 +485,19 @@ func TestRunScenario_ScriptedJS_DisallowedHostHardFailsWithoutYes(t *testing.T) 
 	if err != nil {
 		t.Fatalf("runScenario returned a hard error: %v (expected the per-iteration failure to be recorded instead)", err)
 	}
-	if result.Failed == 0 {
-		t.Error("expected every iteration to fail: the safety gate should have refused the disallowed host")
+	assertEveryIterationRefused(t, result)
+}
+
+// assertEveryIterationRefused checks a run whose only call the safety gate
+// refused: every iteration failed, and a refused call is not a request.
+func assertEveryIterationRefused(t *testing.T, result *report.Result) {
+	t.Helper()
+	it := result.Iterations
+	if it == nil || it.Total == 0 || it.Failed != it.Total {
+		t.Errorf("Iterations = %+v, expected every iteration to fail: the safety gate should have refused the disallowed host", it)
+	}
+	if result.Total != 0 {
+		t.Errorf("Total = %d, want 0: a refused call is not sent, so it is not a request", result.Total)
 	}
 }
 
@@ -554,7 +570,5 @@ func TestRunScenario_ScriptedPython_SafetyGateWiredThrough(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runScenario returned a hard error: %v", err)
 	}
-	if result.Failed == 0 {
-		t.Error("expected every iteration to fail: the safety gate should have refused the disallowed host, for Python the same as JS")
-	}
+	assertEveryIterationRefused(t, result)
 }

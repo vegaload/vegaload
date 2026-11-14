@@ -40,7 +40,7 @@ Delivery is at least once. A consumer dedupes on `(runId, seq)`. Unknown fields 
 | --- | --- |
 | `run.started` | First event of every stream. |
 | `point` | Once per second, after each one-second bucket closes. |
-| `warning` | Something the user should know, for example dropped events. |
+| `warning` | Something the user should know, for example dropped events, or more than 1% of the planned iterations dropped because every VU was busy (sent after the last `point`, before `run.finished`). |
 | `run.finished` | Last event of a run that ran to its end, passed or not. |
 | `run.failed` | Last event of a run that could not run or was interrupted. |
 
@@ -65,7 +65,7 @@ Nothing that came from `-header`, `-body`, `-opt`, `-secret-env`, `-env` or a da
 
 ### `point`
 
-One per second of the run, in order, covering the calls that started in that second.
+One per second of the run, in order, covering the calls that started in that second. A call is a request of the run: one iteration in protocol-direct mode, and each protocol call a scenario makes in a scenario run. A dropped iteration is not a call.
 
 | Field | Type | Notes |
 | --- | --- | --- |

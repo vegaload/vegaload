@@ -28,13 +28,18 @@ type IterationFunc func(ctx context.Context) error
 
 // IterationResult is what the engine records after every iteration.
 // VUID identifies which VU ran the iteration; it has no meaning beyond
-// that, except for ConstantArrivalRate, where -1 marks an arrival that
-// was dropped rather than run (see that executor's doc comment).
+// that.
+//
+// Dropped marks an arrival the arrival-rate executors could not start
+// because every VU was busy. It never ran, so it has no duration and no
+// error, VUID is -1, and Start is when it was due. A Recorder must count
+// it apart from the iterations that ran: it is not a failed request.
 type IterationResult struct {
 	VUID     int
 	Start    time.Time
 	Duration time.Duration
 	Err      error
+	Dropped  bool
 }
 
 // Recorder receives one IterationResult per completed iteration, from
@@ -64,14 +69,15 @@ type IterationTracker interface {
 }
 
 // Summary is a minimal Recorder that keeps running counts: total
-// iterations, failed iterations, and mean duration. It exists so the
-// engine and its tests have something to record into in Phase 0,
-// before internal/report exists. It is not a substitute for that
+// iterations, failed iterations, dropped arrivals, and mean duration. It
+// exists so the engine and its tests have something to record into in
+// Phase 0, before internal/report exists. It is not a substitute for that
 // package's real percentile tracking.
 type Summary struct {
-	total  atomic.Int64
-	failed atomic.Int64
-	nsSum  atomic.Int64
+	total   atomic.Int64
+	failed  atomic.Int64
+	dropped atomic.Int64
+	nsSum   atomic.Int64
 }
 
 // NewSummary returns an empty Summary, ready to use.
@@ -81,6 +87,10 @@ func NewSummary() *Summary {
 
 // Record implements Recorder.
 func (s *Summary) Record(r IterationResult) {
+	if r.Dropped {
+		s.dropped.Add(1)
+		return
+	}
 	s.total.Add(1)
 	s.nsSum.Add(r.Duration.Nanoseconds())
 	if r.Err != nil {
@@ -88,12 +98,17 @@ func (s *Summary) Record(r IterationResult) {
 	}
 }
 
-// Total returns the number of iterations recorded so far.
+// Total returns the number of iterations that ran and were recorded so
+// far. Dropped arrivals are not in it.
 func (s *Summary) Total() int64 { return s.total.Load() }
 
 // Failed returns the number of recorded iterations that had a non-nil
-// error, including arrivals ConstantArrivalRate dropped.
+// error.
 func (s *Summary) Failed() int64 { return s.failed.Load() }
+
+// Dropped returns the number of arrivals an arrival-rate executor could
+// not start because every VU was busy.
+func (s *Summary) Dropped() int64 { return s.dropped.Load() }
 
 // MeanDuration returns the mean iteration duration across every
 // recorded iteration, including failed ones. It returns 0 if nothing
@@ -104,4 +119,12 @@ func (s *Summary) MeanDuration() time.Duration {
 		return 0
 	}
 	return time.Duration(s.nsSum.Load() / total)
+}
+
+// recordDrop tells rec that the arrival due at was not started because
+// every VU was busy. It is not queued, so a struggling target does not
+// cause unbounded VU growth, and it is recorded so it is visible in the
+// results instead of silently missing.
+func recordDrop(rec Recorder, at time.Time) {
+	rec.Record(IterationResult{VUID: -1, Start: at, Dropped: true})
 }

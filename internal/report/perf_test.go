@@ -91,6 +91,49 @@ func TestNFR03_ReportFor1MRequestsWithin5Seconds(t *testing.T) {
 	}
 }
 
+// NFR-03 for a scenario run, whose requests are its calls: 1,000,000 calls
+// in 250,000 iterations, recorded through RecordCall, still report within
+// the limit.
+func TestNFR03_ScenarioReportFor1MCallsWithin5Seconds(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping the 1,000,000-call report check in -short mode")
+	}
+	c := NewCollector()
+	c.RequestsFromCalls()
+	for i := 0; i < nfr03Requests; i++ {
+		var err error
+		if i%97 == 0 {
+			err = os.ErrDeadlineExceeded
+		}
+		c.RecordCall("http", "GET", time.Duration(1+i%400)*time.Millisecond, err, 10, 100)
+		if i%4 == 3 {
+			c.Record(engine.IterationResult{Start: c.start, Duration: time.Duration(4+i%400) * time.Millisecond})
+		}
+	}
+
+	dir := t.TempDir()
+	begin := time.Now()
+	res := c.Finish("fixed-vus", 5*time.Minute)
+	if err := WriteHTML(filepath.Join(dir, "report.html"), res); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteJSON(filepath.Join(dir, "report.json"), res); err != nil {
+		t.Fatal(err)
+	}
+	took := time.Since(begin)
+	t.Logf("1,000,000 calls: Finish + HTML + JSON took %s (limit %s)", took.Round(time.Millisecond), nfr03Limit)
+
+	if res.Total != nfr03Requests || res.Iterations == nil || res.Iterations.Total != nfr03Requests/4 {
+		t.Fatalf("total %d iterations %+v", res.Total, res.Iterations)
+	}
+	if res.FailureReasons[0].Reason != "timeout" || res.FailureReasons[0].Count != res.Failed {
+		t.Errorf("FailureReasons = %+v, failed %d", res.FailureReasons, res.Failed)
+	}
+	if took > nfr03Limit {
+		t.Errorf("NFR-03: report generation for %d calls took %s, the PRD limit is %s", nfr03Requests, took, nfr03Limit)
+	}
+}
+
 // TestCallSamples_1MIterations5Calls checks the memory of the packed call
 // record. 1,000,000 iterations of 5 calls is 5,000,000 uint64 samples,
 // 40 MB of length. Slice capacity adds some overhead; the test logs the
@@ -107,7 +150,7 @@ func TestCallSamples_1MIterations5Calls(t *testing.T) {
 	ops := []string{"connect", "download", "upload", "list", "stat"}
 	for i := 0; i < nfr03Requests; i++ {
 		for _, op := range ops {
-			c.RecordCall("ftp", op, time.Millisecond, false, 1, 1)
+			c.RecordCall("ftp", op, time.Millisecond, nil, 1, 1)
 		}
 	}
 	packed := c.callSampleBytes()
