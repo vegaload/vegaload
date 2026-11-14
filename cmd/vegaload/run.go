@@ -132,6 +132,9 @@ type runConfig struct {
 	Target   protocol.Target
 	Protocol string
 	Timeout  time.Duration
+	// NoConnectionReuse opens a new connection for every HTTP call, in a
+	// scenario and in -protocol http1/http2 (-no-connection-reuse).
+	NoConnectionReuse bool
 
 	OutPath string
 
@@ -225,6 +228,7 @@ func parseRunArgs(args []string) (*runConfig, error) {
 	fs.StringVar(&bodyRaw, "body", "", "request body")
 	fs.BoolVar(&insecure, "insecure", false, "skip TLS certificate verification")
 	fs.DurationVar(&cfg.Timeout, "timeout", 30*time.Second, "time limit for each request: each -protocol call, or each call a scenario makes. A request that runs out of time fails with the reason \"timeout\"")
+	fs.BoolVar(&cfg.NoConnectionReuse, "no-connection-reuse", false, "open a new connection for every HTTP request, in a scenario and in -protocol http1 or http2, instead of keeping connections open between requests. Use it to measure connection setup on purpose")
 	fs.StringVar(&cfg.OutPath, "out", "", "also write a JSON summary to this path")
 	fs.Var(headers, "header", "request header \"Key: Value\" (repeatable)")
 	fs.Var(options, "opt", "driver option key=value, e.g. -opt read=64 (repeatable; each protocol lists its own keys)")
@@ -379,6 +383,9 @@ func parseRunArgs(args []string) (*runConfig, error) {
 			return nil, fmt.Errorf("%s", unknownProtocolMessage(cfg.Protocol))
 		}
 	}
+	if cfg.NoConnectionReuse && cfg.Protocol != "" && cfg.Protocol != "http1" && cfg.Protocol != "http2" {
+		return nil, fmt.Errorf("-no-connection-reuse is for HTTP: a scenario's http calls, or -protocol http1 or http2, not -protocol %s", cfg.Protocol)
+	}
 	if len(cfg.DataSets) > 0 {
 		plan, err := prepareProtocolData(cfg)
 		if err != nil {
@@ -512,7 +519,12 @@ func buildIteration(cfg *runConfig) (engine.IterationFunc, func() error, error) 
 	if cfg.ScenarioPath != "" {
 		return scriptedIteration(cfg, concurrencyHint(cfg))
 	}
-	return protocolIteration(cfg.Protocol, cfg.Target, cfg.Timeout, cfg.callRecorder, cfg.DataPlan)
+	// One driver serves every VU, so its connection pool is sized from
+	// the most VUs that can be in flight at once.
+	target := cfg.Target
+	target.MaxConns = concurrencyHint(cfg)
+	target.NoConnectionReuse = cfg.NoConnectionReuse
+	return protocolIteration(cfg.Protocol, target, cfg.Timeout, cfg.callRecorder, cfg.DataPlan)
 }
 
 // buildSafetyCheck returns the netapi.SafetyCheck every scripted VU's
@@ -697,8 +709,12 @@ func scriptedIteration(cfg *runConfig, concurrency int) (engine.IterationFunc, f
 		if err != nil {
 			return nil, nil, err
 		}
+		opts := []python.Option{python.WithInputs(cfg.Inputs)}
+		if cfg.NoConnectionReuse {
+			opts = append(opts, python.WithNoConnectionReuse())
+		}
 		pool := newVUPool(concurrency, func() (iterCloser, error) {
-			vu, err := script.NewVU(check, cfg.Timeout, python.WithInputs(cfg.Inputs))
+			vu, err := script.NewVU(check, cfg.Timeout, opts...)
 			if err != nil {
 				return nil, err
 			}
@@ -721,8 +737,12 @@ func scriptedIteration(cfg *runConfig, concurrency int) (engine.IterationFunc, f
 	if err != nil {
 		return nil, nil, err
 	}
+	opts := []js.Option{js.WithInputs(cfg.Inputs)}
+	if cfg.NoConnectionReuse {
+		opts = append(opts, js.WithNoConnectionReuse())
+	}
 	pool := newVUPool(concurrency, func() (iterCloser, error) {
-		vu, err := script.NewVU(check, cfg.Timeout, js.WithInputs(cfg.Inputs))
+		vu, err := script.NewVU(check, cfg.Timeout, opts...)
 		if err != nil {
 			return nil, err
 		}
@@ -802,7 +822,9 @@ func runScenarioWithCollector(cfg *runConfig, collector *report.Collector) (*rep
 		}()
 		stopWatcher = func() { close(stop); <-watcherDone }
 	}
+	gen := startGenerator()
 	runErr := ex.Run(ctx, iter, collector)
+	genStats := gen.Stop()
 	stopWatcher()
 	if runErr != nil {
 		return nil, runErr
@@ -810,6 +832,7 @@ func runScenarioWithCollector(cfg *runConfig, collector *report.Collector) (*rep
 	elapsed := time.Since(start)
 
 	result := collector.Finish(ex.Name(), elapsed)
+	applyGenerator(result, genStats, collector.DroppedPercent())
 	if feed != nil {
 		feed.finishWith(result.Warnings)
 	}

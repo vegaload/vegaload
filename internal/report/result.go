@@ -45,6 +45,12 @@ type Result struct {
 	// look, such as many dropped iterations. It is omitted when there is
 	// nothing to say.
 	Warnings []string `json:"warnings,omitempty"`
+
+	// Generator is how hard the machine running VegaLoad worked during
+	// the run. It is omitted when it was not measured, so a report from
+	// before it existed reads the same.
+	Generator *GeneratorStats `json:"generator,omitempty"`
+
 	// TimeSeries is RPS and error rate bucketed by one-second intervals
 	// from the run's start (FR-RPT-01's "RPS over time" and "error rate
 	// over time"). It stays small regardless of request volume — one
@@ -104,6 +110,22 @@ type Result struct {
 type DataFile struct {
 	Name string `json:"name"`
 	Rows int    `json:"rows"`
+}
+
+// GeneratorStats is the load generator's own load during a run: the CPU
+// the VegaLoad process used, as a percentage of all the CPUs it can use,
+// and how long its goroutines waited to be scheduled. Overloaded is true
+// when the run also has a warning starting "generator overloaded:".
+type GeneratorStats struct {
+	CPUs           int     `json:"cpus"`
+	CPUAvgPercent  float64 `json:"cpu_avg_percent"`
+	CPUPeakPercent float64 `json:"cpu_peak_percent"`
+	// SchedLatencyP99 is the 99th percentile of how long a goroutine
+	// waited to run, over the whole run. SchedLatencyPeakP99 is the
+	// highest of the one-second p99 values.
+	SchedLatencyP99     time.Duration `json:"sched_latency_p99_ns"`
+	SchedLatencyPeakP99 time.Duration `json:"sched_latency_peak_p99_ns"`
+	Overloaded          bool          `json:"overloaded"`
 }
 
 // AbortInfo says why and when a run was stopped early (FR-CLI-13).

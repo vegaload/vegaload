@@ -45,6 +45,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -154,6 +155,9 @@ type VU struct {
 	// inputs is what the `env` and `data` globals expose (FR-CLI-17). It
 	// may be nil, which exposes nothing.
 	inputs netapi.Inputs
+
+	// httpOpts are how NewVU builds http, set by Options.
+	httpOpts []netapi.HTTPOption
 }
 
 // SetCheckRecorder sets where this VU reports the outcome of every
@@ -183,6 +187,12 @@ type Option func(*VU)
 // `env` is an empty object and `data` has no files.
 func WithInputs(in netapi.Inputs) Option { return func(v *VU) { v.inputs = in } }
 
+// WithNoConnectionReuse makes every http call open a new connection
+// (-no-connection-reuse).
+func WithNoConnectionReuse() Option {
+	return func(v *VU) { v.httpOpts = append(v.httpOpts, netapi.NoConnectionReuse()) }
+}
+
 // NewVU creates a fresh VU from the script: a new runtime, the script's
 // top-level code run once (so top-level state like a counter declared
 // with let/const starts fresh for this VU), its default export resolved
@@ -204,7 +214,6 @@ func (s *Script) NewVU(check netapi.SafetyCheck, timeout time.Duration, opts ...
 
 	v := &VU{
 		vm:          vm,
-		http:        netapi.NewHTTPClient(check, timeout),
 		proto:       netapi.NewProtoClient(check, timeout),
 		safetyCheck: check,
 		timeout:     timeout,
@@ -212,6 +221,7 @@ func (s *Script) NewVU(check netapi.SafetyCheck, timeout time.Duration, opts ...
 	for _, opt := range opts {
 		opt(v)
 	}
+	v.http = netapi.NewHTTPClient(check, timeout, v.httpOpts...)
 
 	exportsObj := vm.NewObject()
 	moduleObj := vm.NewObject()
@@ -433,15 +443,21 @@ func throw(vm *goja.Runtime, err error) {
 
 // requestOptions is the shape of the optional second argument to every
 // http.* method and ws.connect: `{ headers, body, insecure,
-// expectedStatuses }`. All fields are optional; a caller that passes no
-// options object at all gets the zero value. expectedStatuses is read by
-// parseExpectedStatuses, not by the field mapper, so that a number that is
-// not whole is refused instead of rounded.
+// expectedStatuses, timeout, redirects, params }`. All fields are
+// optional; a caller that passes no options object at all gets the zero
+// value. expectedStatuses is read by parseExpectedStatuses, not by the
+// field mapper, so that a number that is not whole is refused instead of
+// rounded. timeout (a number of milliseconds, or a duration string such as
+// "5s"), redirects and params are read by netapi's parsers, the same ones
+// Python uses; ws.connect ignores them.
 type requestOptions struct {
 	Headers          map[string]string `json:"headers"`
 	Body             string            `json:"body"`
 	Insecure         bool              `json:"insecure"`
 	ExpectedStatuses []int             `json:"-"`
+	Timeout          time.Duration     `json:"-"`
+	Redirects        *int              `json:"-"`
+	Params           url.Values        `json:"-"`
 }
 
 func parseOptions(vm *goja.Runtime, call goja.FunctionCall, argIndex int) requestOptions {
@@ -456,12 +472,31 @@ func parseOptions(vm *goja.Runtime, call goja.FunctionCall, argIndex int) reques
 	if err := vm.ExportTo(arg, &opts); err != nil {
 		throw(vm, fmt.Errorf("js: parsing options: %w", err))
 	}
-	statuses, err := parseExpectedStatuses(vm, arg.ToObject(vm).Get("expectedStatuses"))
+	obj := arg.ToObject(vm)
+	statuses, err := parseExpectedStatuses(vm, obj.Get("expectedStatuses"))
 	if err != nil {
 		throw(vm, fmt.Errorf("js: expectedStatuses: %w", err))
 	}
 	opts.ExpectedStatuses = statuses
+	if opts.Timeout, err = netapi.ParseTimeout(exportOption(obj.Get("timeout")), time.Millisecond); err != nil {
+		throw(vm, fmt.Errorf("js: timeout: %w", err))
+	}
+	if opts.Redirects, err = netapi.ParseRedirects(exportOption(obj.Get("redirects"))); err != nil {
+		throw(vm, fmt.Errorf("js: redirects: %w", err))
+	}
+	if opts.Params, err = netapi.ParseParams(exportOption(obj.Get("params"))); err != nil {
+		throw(vm, fmt.Errorf("js: params: %w", err))
+	}
 	return opts
+}
+
+// exportOption is an option's plain Go value, or nil when the script left
+// it out or gave null.
+func exportOption(v goja.Value) any {
+	if v == nil || goja.IsUndefined(v) || goja.IsNull(v) {
+		return nil
+	}
+	return v.Export()
 }
 
 // parseExpectedStatuses reads the expectedStatuses option: nil when it is
@@ -557,6 +592,9 @@ func (v *VU) doHTTPRequest(vm *goja.Runtime, method, url string, opts requestOpt
 		Headers:            opts.Headers,
 		InsecureSkipVerify: opts.Insecure,
 		ExpectedStatuses:   opts.ExpectedStatuses,
+		Timeout:            opts.Timeout,
+		Redirects:          opts.Redirects,
+		Params:             opts.Params,
 	})
 	if err != nil {
 		throw(vm, err)

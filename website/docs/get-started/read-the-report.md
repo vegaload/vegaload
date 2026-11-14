@@ -37,6 +37,7 @@ Some lines appear only when they apply:
 
 - `failures:` counts the failed calls by reason, such as `12 status 503, 3 timeout`.
 - `dropped:` counts the iterations `constant-arrival-rate` or `ramping-arrival-rate` could not start because every VU was busy. They never ran, so they are not in `total`, `failed` or the latency. When more than 1% of the planned iterations were dropped, a `WARNING:` line says so: the target got less load than you asked for. Raise `-max-vus`.
+- `WARNING:  generator overloaded:` means the machine running VegaLoad could not keep up. It says why: VegaLoad's CPU stayed at 90% or more of the machine's CPUs for 3 seconds or more, its goroutines waited 20 ms or more to run for 3 seconds or more, or more than 1% of the planned iterations were dropped. A busy generator starts calls late and adds its own delay to the latency. Run fewer VUs on one machine, or spread the load over more machines. The CPU is VegaLoad's own process; the `python3` processes of a Python scenario are not counted.
 - A scenario run adds an `iterations` block. In a scenario, each call is one request, and an iteration (one run of the whole scenario function) is counted on its own, with its own failures and duration.
 
 ## The exit code
@@ -53,7 +54,7 @@ A run with no threshold exits 0 even if every call failed. Always set a limit wh
 
 ## The HTML report
 
-The top shows the total, the failed count and the error rate, and the dropped iterations when there were any. A warning about dropped iterations follows, then a **Failures** table of the failed calls by reason. The other sections follow in this order.
+The top shows the total, the failed count and the error rate, and the dropped iterations when there were any. The warnings follow, such as dropped iterations or an overloaded generator, then a **Failures** table of the failed calls by reason. The other sections follow in this order.
 
 **Thresholds.** One row per limit, with PASS or FAIL, the limit and the observed value. The badge on top says "All thresholds passed" or "Thresholds breached".
 
@@ -83,7 +84,8 @@ The top shows the total, the failed count and the error rate, and the dropped it
 | `failure_reasons` | The failed calls by reason: `reason` and `count` |
 | `iterations` | A scenario run's iterations: `total`, `failed`, `error_rate`, `duration` |
 | `dropped_iterations` | Arrivals that could not start because every VU was busy |
-| `warnings` | Plain sentences, such as too many dropped iterations |
+| `warnings` | Plain sentences, such as too many dropped iterations or an overloaded generator |
+| `generator` | How hard the machine running VegaLoad worked: `cpus`, `cpu_avg_percent`, `cpu_peak_percent`, `sched_latency_p99_ns`, `overloaded` |
 | `time_series` | One entry per second: `requests`, `failed`, `rps`, `error_rate` |
 | `thresholds` | One entry per limit: `name`, `metric`, `operator`, `value`, `observed`, `passed` |
 | `thresholds_passed` | `true` only if every limit passed. Absent if you set none. |

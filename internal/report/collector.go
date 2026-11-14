@@ -445,6 +445,16 @@ func (c *Collector) Finish(executor string, elapsed time.Duration) *Result {
 // before a result warns that the run sent less load than it planned.
 const DropWarnPercent = 1.0
 
+// DroppedPercent is the share of planned iterations (those that ran plus
+// those that were dropped) that were dropped so far, from 0 to 100.
+func (c *Collector) DroppedPercent() float64 {
+	ran, dropped := c.ran.Load(), c.dropped.Load()
+	if dropped == 0 {
+		return 0
+	}
+	return 100 * float64(dropped) / float64(ran+dropped)
+}
+
 // dropWarning is the warning of a run that dropped more than
 // DropWarnPercent of its planned iterations, or "". Planned is every
 // iteration that ran plus every one that was dropped.

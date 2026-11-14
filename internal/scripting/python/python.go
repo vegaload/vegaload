@@ -164,11 +164,33 @@ def _expected_statuses(statuses):
             raise VegaloadError("expected_statuses: want a list of whole numbers, like [200, 404], not %r" % (s,))
     return {"expected_statuses": statuses}
 
+def _request_options(timeout, redirects, params):
+    """timeout (seconds, or a duration string such as "500ms"), redirects
+    and params, as given. VegaLoad checks them, the same way it does for
+    JavaScript."""
+    out = {}
+    if timeout is not None:
+        out["timeout"] = timeout
+    if redirects is not None:
+        out["redirects"] = redirects
+    if params is not None:
+        if not isinstance(params, dict):
+            raise VegaloadError("params: want a dict of name: value pairs, like {\"page\": 2}")
+        params = {str(k): list(v) if isinstance(v, (list, tuple)) else v for k, v in params.items()}
+        try:
+            json.dumps(params)
+        except (TypeError, ValueError):
+            raise VegaloadError("params: want strings, numbers, True or False, or lists of them")
+        out["params"] = params
+    return out
+
 class HTTP:
-    def request(self, method, url, headers=None, body=None, insecure=False, expected_statuses=None):
+    def request(self, method, url, headers=None, body=None, insecure=False, expected_statuses=None,
+                timeout=None, redirects=None, params=None):
         result = _call("http", method=method, url=url,
                         headers=headers or {}, body=body or "", insecure=bool(insecure),
-                        **_expected_statuses(expected_statuses))
+                        **_expected_statuses(expected_statuses),
+                        **_request_options(timeout, redirects, params))
         return HTTPResponse(result)
 
     def get(self, url, **kw):
@@ -478,11 +500,17 @@ type message struct {
 	Insecure bool              `json:"insecure"`
 	// ExpectedStatuses is nil when the script did not give
 	// expected_statuses, and empty when it gave an empty list.
-	ExpectedStatuses []int  `json:"expected_statuses"`
-	Name             string `json:"name"`
-	Handle           int    `json:"handle"`
-	Data             string `json:"data"`
-	Text             bool   `json:"text"`
+	ExpectedStatuses []int `json:"expected_statuses"`
+	// HTTPTimeout, Redirects and Params are the http call's timeout,
+	// redirects and params, as the script gave them; netapi's parsers
+	// check them. They are nil when not given.
+	HTTPTimeout any    `json:"timeout"`
+	Redirects   any    `json:"redirects"`
+	Params      any    `json:"params"`
+	Name        string `json:"name"`
+	Handle      int    `json:"handle"`
+	Data        string `json:"data"`
+	Text        bool   `json:"text"`
 	// Fn and Args are a "proto" call: the function (such as "tcp.send")
 	// and its keyword arguments.
 	Fn   string         `json:"fn"`
@@ -538,6 +566,9 @@ type VU struct {
 	// inputs is what the `env` and `data` globals read (FR-CLI-17). It
 	// may be nil, which exposes nothing.
 	inputs netapi.Inputs
+
+	// httpOpts are how NewVU builds http, set by Options.
+	httpOpts []netapi.HTTPOption
 }
 
 // SetCheckRecorder sets where this VU reports the outcome of every
@@ -564,6 +595,12 @@ type Option func(*VU)
 // WithInputs exposes the `env` and `data` globals (FR-CLI-17). Without it,
 // every env name is missing and every data file is unknown.
 func WithInputs(in netapi.Inputs) Option { return func(v *VU) { v.inputs = in } }
+
+// WithNoConnectionReuse makes every http call open a new connection
+// (-no-connection-reuse).
+func WithNoConnectionReuse() Option {
+	return func(v *VU) { v.httpOpts = append(v.httpOpts, netapi.NoConnectionReuse()) }
+}
 
 // NewVU starts a fresh python3 subprocess for one virtual user and waits
 // for its ready signal, which is also where a script that fails to
@@ -599,7 +636,6 @@ func (s *Script) NewVU(check netapi.SafetyCheck, timeout time.Duration, opts ...
 		stdin:       stdin,
 		scanner:     bufio.NewScanner(stdout),
 		stderr:      &stderr,
-		http:        netapi.NewHTTPClient(check, timeout),
 		proto:       netapi.NewProtoClient(check, timeout),
 		safetyCheck: check,
 		timeout:     timeout,
@@ -608,6 +644,7 @@ func (s *Script) NewVU(check netapi.SafetyCheck, timeout time.Duration, opts ...
 	for _, opt := range opts {
 		opt(vu)
 	}
+	vu.http = netapi.NewHTTPClient(check, timeout, vu.httpOpts...)
 
 	msg, err := vu.readMessage()
 	// While the script's top-level code runs, it may read env and data. Any
@@ -852,6 +889,18 @@ func (v *VU) callHTTP(msg message) (interface{}, error) {
 	if err := netapi.CheckExpectedStatuses(msg.ExpectedStatuses); err != nil {
 		return nil, fmt.Errorf("expected_statuses: %w", err)
 	}
+	timeout, err := netapi.ParseTimeout(msg.HTTPTimeout, time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("timeout: %w", err)
+	}
+	redirects, err := netapi.ParseRedirects(msg.Redirects)
+	if err != nil {
+		return nil, fmt.Errorf("redirects: %w", err)
+	}
+	params, err := netapi.ParseParams(msg.Params)
+	if err != nil {
+		return nil, fmt.Errorf("params: %w", err)
+	}
 	var body []byte
 	if msg.Body != "" {
 		body = []byte(msg.Body)
@@ -860,6 +909,9 @@ func (v *VU) callHTTP(msg message) (interface{}, error) {
 		Headers:            msg.Headers,
 		InsecureSkipVerify: msg.Insecure,
 		ExpectedStatuses:   msg.ExpectedStatuses,
+		Timeout:            timeout,
+		Redirects:          redirects,
+		Params:             params,
 	})
 	if err != nil {
 		return nil, err

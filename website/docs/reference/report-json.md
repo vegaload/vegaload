@@ -26,7 +26,8 @@ Some sections appear only when they apply. This page was checked against real 0.
 | `failure_reasons` | How many requests failed for each reason, most first. Present when a request failed. See below. |
 | `iterations` | A scenario run's iterations. Present only for a scenario run. See below. |
 | `dropped_iterations` | Arrivals that `constant-arrival-rate` or `ramping-arrival-rate` could not start because every VU was busy. They never ran, so they are in no other number. Present when there were any. |
-| `warnings` | Plain sentences about what makes the numbers less trustworthy, such as more than 1% of the planned iterations dropped. Present when there is one. |
+| `warnings` | Plain sentences about what makes the numbers less trustworthy, such as more than 1% of the planned iterations dropped, or a warning that starts with `generator overloaded:`. Present when there is one. |
+| `generator` | How hard the machine running VegaLoad worked during the run. See below. |
 | `time_series` | The run, cut into slices over time. |
 | `thresholds` | Each threshold and its result. Present when you set thresholds. |
 | `thresholds_passed` | `true` if every threshold passed. |
@@ -43,6 +44,19 @@ The same fields appear in `steps` and `protocols`.
 | --- | --- |
 | `min_ns`, `mean_ns`, `max_ns` | Fastest, average and slowest call. |
 | `p50_ns`, `p90_ns`, `p95_ns`, `p99_ns` | Percentiles. `p95_ns` means 95% of calls were this fast or faster. |
+
+## `generator`
+
+The load generator's own load. When it cannot keep up, it starts calls late and adds its own delay to the latency, so the numbers show its limits, not the target's.
+
+| Field | Meaning |
+| --- | --- |
+| `cpus` | The CPUs VegaLoad can use (`GOMAXPROCS`, which is the machine's CPU count unless you set it). |
+| `cpu_avg_percent` | The CPU the VegaLoad process used over the run, as a percentage of `cpus`. The `python3` processes of a Python scenario are not in it. |
+| `cpu_peak_percent` | The most it used in one second. |
+| `sched_latency_p99_ns` | How long a goroutine waited to run, 99th percentile, over the run. |
+| `sched_latency_peak_p99_ns` | The highest one-second value of the same. |
+| `overloaded` | `true` when the run has the `generator overloaded:` warning: the CPU was at 90% or more for 3 seconds or more, goroutines waited 20 ms or more to run (p99) for 3 seconds or more, or more than 1% of the planned iterations were dropped. |
 
 ## `failure_reasons[]`
 

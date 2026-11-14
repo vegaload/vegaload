@@ -22,10 +22,22 @@ import (
 // Options are the -opt keys this driver accepts.
 var Options = slices.Clone(tlsconf.Keys)
 
+// The idle pool never shrinks below these, even when target.MaxConns is
+// unknown. Every VU of a run shares one Driver, and Go's default of two
+// idle connections per host would close and reopen a connection for
+// almost every call once more than two VUs run, leaving thousands of
+// sockets in TIME_WAIT.
+const (
+	minIdleConns        = 100
+	minIdleConnsPerHost = 2
+)
+
 // Driver is an HTTP/1.1 protocol.Protocol. It reuses one *http.Client
 // (and the connection pool behind it) across every call to Do, so
 // repeated iterations against the same target benefit from keep-alive
-// the way a real client would.
+// the way a real client would. The pool keeps up to target.MaxConns idle
+// connections per host, so each VU in flight can keep its own;
+// target.NoConnectionReuse turns keep-alive off instead.
 //
 // Driver deliberately disables HTTP/2 on its transport, even if the
 // target would otherwise negotiate it over TLS. That is the difference
@@ -68,7 +80,11 @@ func New(target protocol.Target, timeout time.Duration) (*Driver, error) {
 		// lets net/http populate it with an http2 upgrader when
 		// available) is what keeps this transport on HTTP/1.1 even
 		// against a server that offers HTTP/2 over TLS via ALPN.
-		TLSNextProto: make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
+		TLSNextProto:        make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
+		MaxIdleConns:        max(target.MaxConns, minIdleConns),
+		MaxIdleConnsPerHost: max(target.MaxConns, minIdleConnsPerHost),
+		IdleConnTimeout:     90 * time.Second,
+		DisableKeepAlives:   target.NoConnectionReuse,
 	}
 	if cfg != nil {
 		transport.TLSClientConfig = cfg

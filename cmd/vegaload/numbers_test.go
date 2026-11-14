@@ -221,8 +221,14 @@ func TestRun_ArrivalRateDropsAreNotFailures(t *testing.T) {
 		if res.Latency.Min < 15*time.Millisecond || res.Latency.P50 < 15*time.Millisecond {
 			t.Errorf("%s: latency min %s p50 %s, want every request at 15ms or more (no 0 ms drops)", name, res.Latency.Min, res.Latency.P50)
 		}
-		if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "were dropped because every VU was busy") {
-			t.Errorf("%s: Warnings = %q, want the drop warning", name, res.Warnings)
+		// The drop warning, then the generator overload warning naming the
+		// drops among its causes.
+		if len(res.Warnings) != 2 || !strings.Contains(res.Warnings[0], "were dropped because every VU was busy") ||
+			!strings.HasPrefix(res.Warnings[1], overloadPrefix) || !strings.Contains(res.Warnings[1], "iterations were dropped") {
+			t.Errorf("%s: Warnings = %q, want the drop warning and the overload warning", name, res.Warnings)
+		}
+		if res.Generator == nil || !res.Generator.Overloaded {
+			t.Errorf("%s: Generator = %+v, want overloaded", name, res.Generator)
 		}
 	}
 }
