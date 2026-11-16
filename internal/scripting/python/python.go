@@ -11,6 +11,13 @@
 //	    # one iteration's worth of work
 //	    pass
 //
+// It may also define setup() and teardown(data), which a run calls once
+// each around the load, and a module-level options dict with its load
+// shape. iteration(data) gets what setup returned when it takes a
+// parameter. sleep(seconds) and sleep(min, max) wait without making a call.
+// What the script prints is sent to Go as a "log" message, since stdout
+// carries the protocol.
+//
 // Each VU gets its own python3 subprocess (started once, in NewVU, and
 // reused for every iteration that VU runs) talking a line-delimited JSON
 // RPC protocol over stdin/stdout — not a fresh process per iteration,
@@ -67,6 +74,7 @@ import (
 
 	"github.com/vegaload/vegaload/internal/pyfind"
 	"github.com/vegaload/vegaload/internal/scripting/netapi"
+	"github.com/vegaload/vegaload/internal/secrets"
 	"github.com/vegaload/vegaload/internal/urlname"
 )
 
@@ -114,13 +122,48 @@ func findInterpreter() (pyfind.Interpreter, error) {
 // See the package doc comment for a worked example and VU.Iteration for
 // the Go side of this same protocol.
 const harnessTemplate = `
-import sys, json, runpy, itertools, time, string
+import sys, json, runpy, itertools, time, string, inspect, signal
+
+# Ctrl-C in a terminal reaches this process too. vegaload stops the run and
+# still needs this VU for teardown, then ends it by closing stdin.
+signal.signal(signal.SIGINT, signal.SIG_IGN)
 
 _next_id = itertools.count(1)
 
+# The real stdout carries the protocol. What a script prints goes through
+# _Print instead, and vegaload prints it with secret values removed.
+_proto_out = sys.stdout
+
 def _send(msg):
-    sys.stdout.write(json.dumps(msg) + "\n")
-    sys.stdout.flush()
+    _proto_out.write(json.dumps(msg) + "\n")
+    _proto_out.flush()
+
+class _Print(object):
+    encoding = "utf-8"
+
+    def __init__(self):
+        self._buf = ""
+
+    def write(self, s):
+        self._buf += str(s)
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            _send({"type": "log", "line": line})
+        return len(s)
+
+    def flush(self):
+        pass
+
+    def isatty(self):
+        return False
+
+    def drain(self):
+        if self._buf:
+            _send({"type": "log", "line": self._buf})
+            self._buf = ""
+
+_print = _Print()
+sys.stdout = _print
 
 def _recv():
     line = sys.stdin.readline()
@@ -481,24 +524,46 @@ def group(name, fn=None):
     with g:
         return fn()
 
-def _respond_ready(ok, error=None):
+def sleep(*seconds):
+    """sleep(seconds) or sleep(min, max): wait, without making a call. With
+    two arguments the time is picked at random between them. It ends early
+    when the run ends."""
+    _call("sleep", seconds=list(seconds))
+
+def _respond_ready(ok, error=None, **fields):
+    _print.drain()
     msg = {"type": "ready", "ok": ok}
     if error is not None:
         msg["error"] = error
+    msg.update(fields)
     _send(msg)
 
-def _respond_result(ok, error=None):
+def _respond_result(ok, error=None, **fields):
+    _print.drain()
     msg = {"type": "result", "ok": ok}
     if error is not None:
         msg["error"] = error
+    msg.update(fields)
     _send(msg)
+
+def _takes_arg(fn):
+    try:
+        params = inspect.signature(fn).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD, p.VAR_POSITIONAL) for p in params)
+
+def _with_data(fn, data):
+    if _takes_arg(fn):
+        return fn(data)
+    return fn()
 
 def main():
     script_path = sys.argv[1]
     try:
         module_globals = runpy.run_path(
             script_path,
-            init_globals={"http": http, "ws": ws, "tcp": tcp, "udp": udp, "mqtt": mqtt, "kafka": kafka, "grpc": grpc, "postgres": postgres, "mysql": mysql, "redis": redis, "rabbitmq": rabbitmq, "ftp": ftp, "sftp": sftp, "check": check, "step": step, "group": group, "env": env, "data": data},
+            init_globals={"http": http, "ws": ws, "tcp": tcp, "udp": udp, "mqtt": mqtt, "kafka": kafka, "grpc": grpc, "postgres": postgres, "mysql": mysql, "redis": redis, "rabbitmq": rabbitmq, "ftp": ftp, "sftp": sftp, "check": check, "step": step, "group": group, "sleep": sleep, "env": env, "data": data},
             run_name="__vegaload_scenario__",
         )
     except BaseException as e:
@@ -509,9 +574,27 @@ def main():
     if not callable(iteration):
         _respond_ready(False, "script has no callable iteration() function")
         sys.exit(1)
+    hooks = {}
+    for name in ("setup", "teardown"):
+        fn = module_globals.get(name)
+        if fn is not None and not callable(fn):
+            _respond_ready(False, "%s must be a function" % name)
+            sys.exit(1)
+        hooks[name] = fn
+    options = module_globals.get("options")
+    if options is not None:
+        if not isinstance(options, dict):
+            _respond_ready(False, 'options must be a dict, like options = {"vus": 10}')
+            sys.exit(1)
+        try:
+            options = json.loads(json.dumps(options))
+        except (TypeError, ValueError) as e:
+            _respond_ready(False, "options: %s" % e)
+            sys.exit(1)
 
-    _respond_ready(True)
+    _respond_ready(True, setup=hooks["setup"] is not None, teardown=hooks["teardown"] is not None, options=options)
 
+    setup_data = None
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -521,12 +604,26 @@ def main():
         except Exception as e:
             _respond_result(False, "parsing command: %s" % e)
             continue
-        if cmd.get("cmd") != "iteration":
-            _respond_result(False, "unexpected command %r" % cmd.get("cmd"))
-            continue
+        what = cmd.get("cmd")
         try:
-            iteration()
-            _respond_result(True)
+            if what == "iteration":
+                _with_data(iteration, setup_data)
+                _respond_result(True)
+            elif what == "set_data":
+                setup_data = cmd.get("data")
+                _respond_result(True)
+            elif what == "setup":
+                value = hooks["setup"]()
+                try:
+                    text = json.dumps(value)
+                except (TypeError, ValueError) as e:
+                    raise TypeError("setup must return a value JSON can hold: %s" % e)
+                _respond_result(True, value=json.loads(text))
+            elif what == "teardown":
+                _with_data(hooks["teardown"], cmd.get("data"))
+                _respond_result(True)
+            else:
+                _respond_result(False, "unexpected command %r" % what)
         except BaseException as e:
             _respond_result(False, "%s: %s" % (type(e).__name__, e))
 
@@ -570,6 +667,18 @@ type message struct {
 	Type  string `json:"type"`
 	OK    bool   `json:"ok"`
 	Error string `json:"error"`
+	// Line is a line the script printed, on a "log" message.
+	Line string `json:"line"`
+
+	// Present on a "ready" message: whether the script has setup and
+	// teardown functions, and its options dict.
+	Setup    bool           `json:"setup"`
+	Teardown bool           `json:"teardown"`
+	Options  map[string]any `json:"options"`
+	// Value is what setup returned, on the "result" of a setup command.
+	Value json.RawMessage `json:"value"`
+	// Seconds are the arguments of a "sleep" call.
+	Seconds []any `json:"seconds"`
 
 	// Present on a "call" message.
 	ID       int               `json:"id"`
@@ -625,6 +734,8 @@ type cmdMsg struct {
 	OK     bool        `json:"ok"`
 	Error  string      `json:"error,omitempty"`
 	Result interface{} `json:"result,omitempty"`
+	// Data is the setup data, on a set_data or teardown command.
+	Data json.RawMessage `json:"data,omitempty"`
 }
 
 // VU is one virtual user's python3 subprocess, plus the HTTP client and
@@ -658,6 +769,12 @@ type VU struct {
 
 	// httpOpts are how NewVU builds http, set by Options.
 	httpOpts []netapi.HTTPOption
+
+	// hasSetup, hasTeardown and options are what the script defines, as
+	// its ready message said.
+	hasSetup    bool
+	hasTeardown bool
+	options     map[string]any
 }
 
 // SetCheckRecorder sets where this VU reports the outcome of every
@@ -696,6 +813,11 @@ func WithNoConnectionReuse() Option {
 // (-no-url-grouping).
 func WithNoURLGrouping() Option {
 	return func(v *VU) { v.httpOpts = append(v.httpOpts, netapi.NoURLGrouping()) }
+}
+
+// WithNoCookies turns off the VU's cookie jar (-no-cookies).
+func WithNoCookies() Option {
+	return func(v *VU) { v.httpOpts = append(v.httpOpts, netapi.NoCookies()) }
 }
 
 // NewVU starts a fresh python3 subprocess for one virtual user and waits
@@ -766,12 +888,69 @@ func (s *Script) NewVU(check netapi.SafetyCheck, timeout time.Duration, opts ...
 		_ = vu.Close()
 		return nil, fmt.Errorf("python: %s", msg.Error)
 	}
+	vu.hasSetup, vu.hasTeardown, vu.options = msg.Setup, msg.Teardown, msg.Options
 
 	return vu, nil
 }
 
-// readMessage reads and parses one protocol line from the interpreter.
+// HasSetup says whether the script defines setup().
+func (v *VU) HasSetup() bool { return v.hasSetup }
+
+// HasTeardown says whether the script defines teardown().
+func (v *VU) HasTeardown() bool { return v.hasTeardown }
+
+// Options returns the script's module-level options dict, or nil when it
+// has none.
+func (v *VU) Options() (map[string]any, error) { return v.options, nil }
+
+// Setup runs the script's setup() once and returns its value as JSON
+// ("null" when it returns None). A value JSON cannot hold is an error.
+func (v *VU) Setup(ctx context.Context) (json.RawMessage, error) {
+	if !v.hasSetup {
+		return json.RawMessage("null"), nil
+	}
+	msg, err := v.command(ctx, cmdMsg{Cmd: "setup"})
+	if err != nil {
+		return nil, err
+	}
+	if len(msg.Value) == 0 {
+		return json.RawMessage("null"), nil
+	}
+	return msg.Value, nil
+}
+
+// Teardown runs the script's teardown() once, with data (the JSON setup
+// returned) when it takes an argument.
+func (v *VU) Teardown(ctx context.Context, data json.RawMessage) error {
+	if !v.hasTeardown {
+		return nil
+	}
+	_, err := v.command(ctx, cmdMsg{Cmd: "teardown", Data: data})
+	return err
+}
+
+// SetData gives this VU's interpreter its own copy of data, the JSON setup
+// returned. iteration(data) gets it on every iteration. Call it before the
+// first Iteration.
+func (v *VU) SetData(data json.RawMessage) error {
+	_, err := v.command(context.Background(), cmdMsg{Cmd: "set_data", Data: data})
+	return err
+}
+
+// readMessage reads and parses one protocol line from the interpreter. A
+// line the script printed is printed here, with secret values removed, and
+// the next line is read.
 func (v *VU) readMessage() (message, error) {
+	for {
+		msg, err := v.readLine()
+		if err != nil || msg.Type != "log" {
+			return msg, err
+		}
+		fmt.Println(secrets.Redact(msg.Line))
+	}
+}
+
+func (v *VU) readLine() (message, error) {
 	if !v.scanner.Scan() {
 		if err := v.scanner.Err(); err != nil {
 			return message{}, fmt.Errorf("reading from interpreter: %w", err)
@@ -840,36 +1019,47 @@ func (v *VU) writeCmd(m cmdMsg) error {
 // script makes (via the same ctx, same as js.VU); the subprocess itself
 // is only reclaimed when Close is called, which the executor is
 // expected to do once the run ends.
+//
+// The cookie jar starts empty, so each iteration is one user's session.
 func (v *VU) Iteration(ctx context.Context) error {
+	_, err := v.command(ctx, cmdMsg{Cmd: "iteration"})
+	return err
+}
+
+// command sends one command (iteration, setup, teardown, set_data) with an
+// empty cookie jar, answers the calls the script makes while it runs, and
+// returns the command's result.
+func (v *VU) command(ctx context.Context, cmd cmdMsg) (message, error) {
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
+		return message{}, ctx.Err()
 	default:
 	}
 
 	v.ctx = ctx
-	if err := v.writeCmd(cmdMsg{Cmd: "iteration"}); err != nil {
-		return fmt.Errorf("python: %w", err)
+	v.http.ResetCookies()
+	if err := v.writeCmd(cmd); err != nil {
+		return message{}, fmt.Errorf("python: %w", err)
 	}
 
 	for {
 		msg, err := v.readMessageCtx(ctx)
 		if err != nil {
-			return fmt.Errorf("python: %w", err)
+			return message{}, fmt.Errorf("python: %w", err)
 		}
 
 		switch msg.Type {
 		case "result":
 			if !msg.OK {
-				return fmt.Errorf("python: %s", msg.Error)
+				return message{}, fmt.Errorf("python: %s", msg.Error)
 			}
-			return nil
+			return msg, nil
 		case "call":
 			if err := v.handleCall(msg); err != nil {
-				return fmt.Errorf("python: %w", err)
+				return message{}, fmt.Errorf("python: %w", err)
 			}
 		default:
-			return fmt.Errorf("python: unexpected message type %q from interpreter", msg.Type)
+			return message{}, fmt.Errorf("python: unexpected message type %q from interpreter", msg.Type)
 		}
 	}
 }
@@ -917,6 +1107,8 @@ func (v *VU) dispatchCall(msg message) (interface{}, error) {
 		return map[string]interface{}{}, nil
 	case "proto":
 		return v.callProto(msg)
+	case "sleep":
+		return v.callSleep(msg)
 	case "env":
 		return v.callEnv(msg), nil
 	case "data":
@@ -948,6 +1140,19 @@ func (v *VU) callProto(msg message) (interface{}, error) {
 		return nil, err
 	}
 	return reply.Fields(), nil
+}
+
+// callSleep answers sleep(): it waits here, so the wait ends as soon as the
+// run does. A sleep is not a call, so it is in no call's latency.
+func (v *VU) callSleep(msg message) (interface{}, error) {
+	d, err := netapi.SleepArgs(msg.Seconds)
+	if err != nil {
+		return nil, err
+	}
+	if !netapi.Sleep(v.ctx, d) {
+		return nil, fmt.Errorf("sleep: the run ended")
+	}
+	return map[string]interface{}{}, nil
 }
 
 // callEnv answers env.NAME: the variable's value if the run exposed it.

@@ -21,6 +21,11 @@ baselines. For a quick check that an API works under a few users, use the
   `check_rate` threshold metric. A threshold can target one step
   (`p95{step="login"} < 300ms`), one protocol (`p95{protocol="ftp"} < 500ms`)
   or one operation (`error_rate{protocol="ftp",op="roundtrip"} < 1%`).
+  `sleep(s)` / `sleep(min, max)` add think time, each VU keeps cookies
+  within an iteration, `export function setup()` / `teardown(data)` run once
+  around the load, and `export const options = {...}` (Python
+  `options = {...}`) keeps the load shape in the file; `run_test` arguments
+  win over it.
 - `run_test` — run a load test against a scenario file or a protocol-direct
   target (`target` + `protocol`). Choose `executor`: `fixed-vus`, `ramp`,
   `step`, or `constant-arrival-rate`. Pass `baseline_path` (and `max_regression`,

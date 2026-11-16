@@ -7,11 +7,9 @@ import (
 	"math"
 	"net/url"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/vegaload/vegaload/internal/engine"
@@ -111,7 +109,6 @@ type streaming struct {
 	collector  *report.Collector // set once the run's clock starts
 	executor   string
 	closeOnce  sync.Once
-	sigStop    func()
 	closeStuck []string
 }
 
@@ -441,38 +438,12 @@ func (o *runOutcome) fail(err error) {
 	o.reason = secrets.Redact(urlerr.Mask(err.Error()))
 }
 
-// watchSignals ends the stream with run.failed (reason "interrupted") on
-// Ctrl-C or SIGTERM, then exits with the status a process killed by that
-// signal shows in a shell (130, 143). Without a stream, `run` installs no
-// handler and a signal kills it exactly as before.
-func (st *streaming) watchSignals() {
-	ch := make(chan os.Signal, 1)
-	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
-	quit := make(chan struct{})
-	st.sigStop = func() {
-		signal.Stop(ch)
-		close(quit)
-	}
-	go func() {
-		select {
-		case sig := <-ch:
-			// A second signal must not be swallowed while the sinks flush.
-			signal.Stop(ch)
-			os.Exit(st.interrupt(sig))
-		case <-quit:
-		}
-	}()
-}
-
 // interrupt ends the stream for a run stopped by sig and returns the exit
 // code a shell shows for a process killed by it: 130 for Ctrl-C, 143 for SIGTERM.
 func (st *streaming) interrupt(sig os.Signal) int {
 	st.rec.Failed("interrupted", st.partialOrNil())
 	st.closeSinks(interruptCloseTimeout)
-	if sig == syscall.SIGTERM {
-		return 143
-	}
-	return 130
+	return signalExitCode(sig)
 }
 
 // partialOrNil returns the partial result as an any that is nil when there is none.
@@ -490,9 +461,6 @@ func (st *streaming) partialOrNil() any {
 func (st *streaming) end(cfg *runConfig, out *runOutcome, code int) {
 	if st == nil {
 		return
-	}
-	if st.sigStop != nil {
-		st.sigStop()
 	}
 	if out.result != nil {
 		st.rec.Finished(out.result, code == 0, code)

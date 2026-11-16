@@ -41,6 +41,7 @@ Every command takes `-output text` (the default) or `-output json`. `run` and `d
 | 1 | | `validate`: the scenario is not valid. `compare`: a regression. `merge`: a report cannot be read or merged. `doctor`: a check failed. `init -status`: something is missing. |
 | 2 | VegaLoad refused to start, for example a host that is not allowed. | `validate`, `merge`: bad usage. |
 | 3 | A threshold or the baseline gate was breached. | `merge`: the merged result breached a threshold. |
+| 130, 143 | Stopped by Ctrl-C (130) or SIGTERM (143). The load stops and a scenario's `teardown` runs first. A second Ctrl-C quits at once. | |
 
 A run with no threshold exits 0 even if every call failed. See [Troubleshooting](../help/troubleshooting.md).
 
@@ -51,6 +52,8 @@ vegaload run [flags] [scenario-file]
 ```
 
 Give a scenario file, or give `-target` and `-protocol` for a protocol-direct run.
+
+A scenario file can set `executor`, `vus`, `duration`, `stages`, `rate`, `maxVUs`, `timeout` and `thresholds` in its own options. A flag you give wins over the option. See [Options in the file](../guides/scenarios.md#options-in-the-file).
 
 ### Target and request
 
@@ -66,6 +69,7 @@ Give a scenario file, or give `-target` and `-protocol` for a protocol-direct ru
 | `-timeout` | Time limit for each request: each `-protocol` call, or each call a scenario makes. A request that runs out of time fails with the reason `timeout`. Default `30s`. |
 | `-no-connection-reuse` | Open a new connection for every HTTP request, in a scenario and in `-protocol http1` or `http2`, instead of keeping connections open between requests. Use it to measure connection setup on purpose. |
 | `-no-url-grouping` | Keep each HTTP call's URL path as written in its endpoint row. By default a path part that is all digits, a UUID or 16 or more hex digits becomes `{id}`, so `/users/1` and `/users/2` share the row `GET /users/{id}`. For a scenario's HTTP calls and `-protocol http1` or `http2`. See [Endpoint rows](../guides/http.md#endpoint-rows). |
+| `-no-cookies` | Turn off each scenario VU's cookie jar. By default a cookie a server sets is sent back on that VU's later calls, and the jar is emptied at the start of each iteration. Scenario files only. See [Cookies](../guides/scenarios.md#cookies). |
 
 ### Load shape
 
@@ -154,7 +158,7 @@ See [Safety](../ai-agents/safety.md).
 vegaload validate [flags] <scenario-file>
 ```
 
-Runs the scenario once, with one user and one iteration. It makes real network calls and follows the same host rules as `run`. Flags: `-allow-target`, `-yes`, `-audit-log`, `-data`, `-data-pick`, `-env`, `-secret-env`, `-timeout` (default `30s`), `-trigger`, `-output`.
+Runs the scenario once, with one user: its `setup`, one iteration with what setup returned, then its `teardown`. It also checks the scenario's options. It makes real network calls and follows the same host rules as `run`. Flags: `-allow-target`, `-yes`, `-audit-log`, `-data`, `-data-pick`, `-env`, `-secret-env`, `-timeout` (default `30s`), `-trigger`, `-output`.
 
 ## `new`
 
