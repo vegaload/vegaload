@@ -279,3 +279,17 @@ func captureStdout(t *testing.T, fn func()) string {
 	_ = w.Close()
 	return <-done
 }
+
+func TestVegaloadError_ScriptsCanCatchItByName(t *testing.T) {
+	vu := newTestVU(t, `
+def iteration():
+    try:
+        http.get("http://127.0.0.1:1/", expected_statuses="200")
+    except VegaloadError as e:
+        raise RuntimeError("caught: " + str(e))
+`)
+	err := vu.Iteration(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "caught: expected_statuses") {
+		t.Fatalf("want the call error caught as VegaloadError, got %v", err)
+	}
+}

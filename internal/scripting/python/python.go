@@ -563,7 +563,7 @@ def main():
     try:
         module_globals = runpy.run_path(
             script_path,
-            init_globals={"http": http, "ws": ws, "tcp": tcp, "udp": udp, "mqtt": mqtt, "kafka": kafka, "grpc": grpc, "postgres": postgres, "mysql": mysql, "redis": redis, "rabbitmq": rabbitmq, "ftp": ftp, "sftp": sftp, "check": check, "step": step, "group": group, "sleep": sleep, "env": env, "data": data},
+            init_globals={"http": http, "ws": ws, "tcp": tcp, "udp": udp, "mqtt": mqtt, "kafka": kafka, "grpc": grpc, "postgres": postgres, "mysql": mysql, "redis": redis, "rabbitmq": rabbitmq, "ftp": ftp, "sftp": sftp, "check": check, "step": step, "group": group, "sleep": sleep, "env": env, "data": data, "VegaloadError": VegaloadError},
             run_name="__vegaload_scenario__",
         )
     except BaseException as e:
