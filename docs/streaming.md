@@ -98,7 +98,7 @@ The bucket width is the same one-second width as the final `time_series` in the 
 
 ### `run.finished`
 
-`data` is the run's structured result, exactly what `-out` writes (the `report.Result` JSON: `schema`, `executor`, `started_at`, `elapsed_ns`, `total`, `failed`, `error_rate`, `latency`, `time_series`, and when present `warnings`, `generator`, `thresholds`, `thresholds_passed`, `aborted`, `baseline`, `steps`, `protocols`, `checks`, `data_files`), plus the fields below. Every latency block in it carries a `histogram` (see `website/docs/reference/report-json.md`). `schema` and `histogram` were added later; a reader that does not know them ignores them.
+`data` is the run's structured result, exactly what `-out` writes (the `report.Result` JSON: `schema`, `executor`, `started_at`, `elapsed_ns`, `total`, `failed`, `error_rate`, `latency`, `time_series`, and when present `warnings`, `generator`, `thresholds`, `thresholds_passed`, `aborted`, `baseline`, `steps`, `protocols`, `checks`, `data_files`), plus the fields below. Every latency block in it carries a `histogram` (see `website/docs/reference/report-json.md`). `schema` and `histogram` were added later; a reader that does not know them ignores them. The HTTP endpoint rows, such as `GET /users/{id}`, are the `operations` of the `http`, `http1` and `http2` entries of `protocols`, each with `method` and `endpoint` (added later too). Live points do not carry them.
 
 | Field | Type | Notes |
 | --- | --- | --- |

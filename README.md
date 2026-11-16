@@ -954,6 +954,75 @@ res = http.get("http://127.0.0.1:8080/widgets",
 
 A value of the wrong type throws an error the script can catch, and no request is sent.
 
+### Endpoint rows
+
+The report has one row per endpoint: the method and a name, such as `GET /users/{id}`. Each row has its own calls, failures, error rate and latency. The terminal summary, the HTML report and the GitHub step summary show them under `endpoints`.
+
+The name of a call is, in this order:
+
+1. its `name` option, or the name `http.url` gives it,
+2. else the name of the innermost `group()` it runs in (see [Groups](#groups)),
+3. else the path of its URL, without the query or the fragment.
+
+In a path, a part that is all digits, a UUID, or 16 or more hex digits becomes `{id}`. So `/users/1` to `/users/1000` are one row, `GET /users/{id}`. A short part such as `/v2/abc` stays as it is. Add `-no-url-grouping` to keep every path as written.
+
+Name a call yourself when other parts of its URL change:
+
+```js
+http.get(`${base}/users/${user}/posts`, { name: "/users/{user}/posts" });
+```
+
+```python
+http.get(f"{base}/users/{user}/posts", name="/users/{user}/posts")
+```
+
+`http.url` names the row after the URL as you wrote it. In JavaScript it is a tagged template. Each value in the path shows as `${}`:
+
+```js
+http.get(http.url`http://127.0.0.1:8080/users/${id}`); // row: GET /users/${}
+```
+
+Python has no tagged templates. `http.url` takes a template with `{}` placeholders, then the values. The row is the same as in JavaScript:
+
+```python
+http.get(http.url("http://127.0.0.1:8080/users/{}", user_id))  # row: GET /users/${}
+```
+
+`String()` of the value (Python: `str()`) is the URL. A `name` option wins over the `http.url` name.
+
+A `-protocol http1` or `http2` run has one row: `-method` and the path of `-target`, with the same `{id}` rule.
+
+A run keeps at most 500 rows. The calls to any more names are counted in one row, `Other`, so the totals stay right.
+
+Gate on one row with a threshold. In a scenario the protocol is `http`. In a `-protocol` run it is `http1` or `http2`:
+
+```bash
+./vegaload run -threshold 'p95{protocol="http",op="GET /users/{id}"} < 300ms' scenario.vl.js
+```
+
+### Groups
+
+A group is a step that also names the HTTP calls inside it. `group(name, fn)` runs `fn` and returns its value:
+
+```js
+const order = group("checkout", () => {
+  http.post(base + "/cart", { body: cart });    // row: POST checkout
+  return http.post(base + "/orders").json();    // row: POST checkout
+});
+```
+
+In Python, `with group("checkout"):` names a block, and `group("checkout", fn)` runs a function and returns its value:
+
+```python
+with group("checkout"):
+    http.post(base + "/cart", body=cart)
+    order = http.post(base + "/orders").json()
+```
+
+Each HTTP call inside is reported as `METHOD checkout`, unless the call has its own `name` or uses `http.url`. When groups nest, the innermost one names the calls. Calls over other protocols keep their own names.
+
+A group is timed like a step: it is in the steps table, and `-threshold 'p95{step="checkout"} < 500ms'` gates it. A group that throws (or raises) fails like a step. See [Endpoint rows](#endpoint-rows) and [Steps](#steps).
+
 ### Call other protocols from a scenario
 
 The full list, with options and examples, is in [Supported protocols](#supported-protocols).
@@ -1493,7 +1562,8 @@ each is counted on its own. Gate on one step with a selector:
 `-threshold 'p95{step="login"} < 300ms'`. A step that never ran fails its
 threshold. Step names with a quote mark in them cannot be targeted. A run
 keeps at most 100 distinct step names; any more are counted together as
-`(other steps)`. See `examples/scenarios/crud-flow.vl.js`.
+`(other steps)`. See `examples/scenarios/crud-flow.vl.js`. A `group(name, fn)`
+is a step that also names the HTTP calls inside it (see [Groups](#groups)).
 
 #### Per-protocol results
 
@@ -1513,13 +1583,16 @@ Under ftp, the operations are `roundtrip`, `upload`, and so on.
 The JSON report includes `protocols` when at least one call was recorded. The
 text summary, the HTML report and the GitHub step summary show the table when
 the run used more than one protocol, or one protocol that is not `http`,
-`http1` or `http2`. A plain HTTP run looks as it did before.
+`http1` or `http2`. The operations of `http`, `http1` and `http2` are not in
+that table. They are the `endpoints` table, shown for every run that made
+HTTP calls.
 
 The names are the protocol and the operation. A script's HTTP calls are
-`http`, and the operation is the method (`GET`, `POST`, and so on; any other
-verb is `OTHER`). A `-protocol` run uses the driver's name, such as `http1`,
-`http2`, `grpc` or `websocket`. The operation is the mode, such as
-`roundtrip`. More measures will come later.
+`http`, and the operation is the endpoint row, such as `GET /users/{id}` (see
+[Endpoint rows](#endpoint-rows)). A `-protocol` run uses the
+driver's name, such as `http1`, `http2`, `grpc` or `websocket`. For `http1`
+and `http2` the operation is the endpoint row of `-target`. For the others it
+is the mode, such as `roundtrip`. More measures will come later.
 
 FTP and SFTP also record phase times: `connect_time`, `login_time`,
 `upload_time`, `download_time` and `delete_time`. A connect or login under
@@ -1541,6 +1614,13 @@ or operation that recorded no calls fails its threshold.
 ./vegaload run -threshold 'p95{protocol="ftp"} < 500ms' \
   -threshold 'error_rate{protocol="ftp",op="roundtrip"} < 1%' \
   -target ftp://127.0.0.1:2121/ -protocol ftp -opt mode=roundtrip ...
+```
+
+Put an operation in quotes. It may hold spaces, slashes and braces, so one
+HTTP endpoint is a selector too:
+
+```
+./vegaload run -threshold 'p95{protocol="http",op="GET /users/{id}"} < 300ms' scenario.vl.js
 ```
 
 A thresholds file names them next to `step`:

@@ -39,6 +39,15 @@ Some lines appear only when they apply:
 - `dropped:` counts the iterations `constant-arrival-rate` or `ramping-arrival-rate` could not start because every VU was busy. They never ran, so they are not in `total`, `failed` or the latency. When more than 1% of the planned iterations were dropped, a `WARNING:` line says so: the target got less load than you asked for. Raise `-max-vus`.
 - `WARNING:  generator overloaded:` means the machine running VegaLoad could not keep up. It says why: VegaLoad's CPU stayed at 90% or more of the machine's CPUs for 3 seconds or more, its goroutines waited 20 ms or more to run for 3 seconds or more, or more than 1% of the planned iterations were dropped. A busy generator starts calls late and adds its own delay to the latency. Run fewer VUs on one machine, or spread the load over more machines. The CPU is VegaLoad's own process; the `python3` processes of a Python scenario are not counted.
 - A scenario run adds an `iterations` block. In a scenario, each call is one request, and an iteration (one run of the whole scenario function) is counted on its own, with its own failures and duration.
+- A run that made HTTP calls adds an `endpoints` block, one line per endpoint:
+
+  ```
+  endpoints
+    PASS  GET /users/{id}  1000 calls, 0 failed (0.00%)  p50 273µs  p95 478µs  max 3.509ms
+    PASS  POST checkout  2 calls, 0 failed (0.00%)  p50 669µs  p95 669µs  max 669µs
+  ```
+
+  A row is the method and a name: the call's `name` option, its `group()`, or its URL path with ids shown as `{id}`. A row shows FAIL if any of its calls failed. A run keeps at most 500 rows; the calls past them are in one row, `Other`. See [Endpoint rows](/guides/http#endpoint-rows).
 
 ## The exit code
 
@@ -63,6 +72,8 @@ The top shows the total, the failed count and the error rate, and the dropped it
 **Steps.** This appears when the scenario wraps stages in `step(name, fn)`. Each step has its own runs, failed count, error rate and p50, p95 and max latency. A step shows FAIL if any of its runs failed. That is not the same as a threshold. A threshold can target a step: `-threshold 'p95{step="list"} < 300ms'`.
 
 ![A report with a steps table](/img/docs/report-steps.png)
+
+**Endpoints.** This appears when the run made HTTP calls. Each endpoint row, such as `GET /users/{id}`, has its own calls, failures, error rate and p50, p95 and max latency. A threshold can target one: `-threshold 'p95{protocol="http",op="GET /users/{id}"} < 300ms'`.
 
 **Protocols.** This appears when the run made calls over more than plain HTTP. Each protocol has its own calls, failures and latency. A threshold can target one: `-threshold 'p95{protocol="ftp"} < 500ms'`.
 
@@ -90,7 +101,7 @@ The top shows the total, the failed count and the error rate, and the dropped it
 | `thresholds` | One entry per limit: `name`, `metric`, `operator`, `value`, `observed`, `passed` |
 | `thresholds_passed` | `true` only if every limit passed. Absent if you set none. |
 | `steps` | One entry per step, with its own counts and latency |
-| `protocols` | One entry per protocol, with its own counts, latency and operations |
+| `protocols` | One entry per protocol, with its own counts, latency and operations. The operations of `http`, `http1` and `http2` are the endpoint rows, with `method` and `endpoint` |
 
 An agent reads this file with the `get_results` tool.
 

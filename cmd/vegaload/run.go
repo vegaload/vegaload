@@ -58,6 +58,7 @@ import (
 	"github.com/vegaload/vegaload/internal/scripting/python"
 	"github.com/vegaload/vegaload/internal/secrets"
 	"github.com/vegaload/vegaload/internal/threshold"
+	"github.com/vegaload/vegaload/internal/urlname"
 )
 
 // exitThresholdsBreached is the exit code of a run that completed but
@@ -135,6 +136,10 @@ type runConfig struct {
 	// NoConnectionReuse opens a new connection for every HTTP call, in a
 	// scenario and in -protocol http1/http2 (-no-connection-reuse).
 	NoConnectionReuse bool
+	// NoURLGrouping keeps each HTTP call's path as it is in its report
+	// row, instead of replacing the parts that look like ids with {id}
+	// (-no-url-grouping).
+	NoURLGrouping bool
 
 	OutPath string
 
@@ -233,6 +238,7 @@ func parseRunArgs(args []string) (*runConfig, error) {
 	fs.BoolVar(&insecure, "insecure", false, "skip TLS certificate verification")
 	fs.DurationVar(&cfg.Timeout, "timeout", 30*time.Second, "time limit for each request: each -protocol call, or each call a scenario makes. A request that runs out of time fails with the reason \"timeout\"")
 	fs.BoolVar(&cfg.NoConnectionReuse, "no-connection-reuse", false, "open a new connection for every HTTP request, in a scenario and in -protocol http1 or http2, instead of keeping connections open between requests. Use it to measure connection setup on purpose")
+	fs.BoolVar(&cfg.NoURLGrouping, "no-url-grouping", false, "keep each HTTP call's URL path as it is in its endpoint row. By default, path parts that are numbers, UUIDs or long hex strings become {id}, so /users/1 and /users/2 share the row GET /users/{id}")
 	fs.StringVar(&cfg.OutPath, "out", "", "also write a JSON summary to this path")
 	fs.BoolVar(&cfg.ExactPercentiles, "exact-percentiles", false, "keep every sample to compute exact percentiles, instead of estimating them within 2.5% from histograms. Memory grows with the number of requests: use it for small local runs")
 	fs.Var(headers, "header", "request header \"Key: Value\" (repeatable)")
@@ -391,6 +397,9 @@ func parseRunArgs(args []string) (*runConfig, error) {
 	if cfg.NoConnectionReuse && cfg.Protocol != "" && cfg.Protocol != "http1" && cfg.Protocol != "http2" {
 		return nil, fmt.Errorf("-no-connection-reuse is for HTTP: a scenario's http calls, or -protocol http1 or http2, not -protocol %s", cfg.Protocol)
 	}
+	if cfg.NoURLGrouping && cfg.Protocol != "" && cfg.Protocol != "http1" && cfg.Protocol != "http2" {
+		return nil, fmt.Errorf("-no-url-grouping is for HTTP: a scenario's http calls, or -protocol http1 or http2, not -protocol %s", cfg.Protocol)
+	}
 	if len(cfg.DataSets) > 0 {
 		plan, err := prepareProtocolData(cfg)
 		if err != nil {
@@ -529,7 +538,7 @@ func buildIteration(cfg *runConfig) (engine.IterationFunc, func() error, error) 
 	target := cfg.Target
 	target.MaxConns = concurrencyHint(cfg)
 	target.NoConnectionReuse = cfg.NoConnectionReuse
-	return protocolIteration(cfg.Protocol, target, cfg.Timeout, cfg.callRecorder, cfg.DataPlan)
+	return protocolIteration(cfg.Protocol, target, cfg.Timeout, cfg.callRecorder, cfg.DataPlan, cfg.NoURLGrouping)
 }
 
 // buildSafetyCheck returns the netapi.SafetyCheck every scripted VU's
@@ -566,7 +575,11 @@ func buildSafetyCheck(cfg *runConfig) netapi.SafetyCheck {
 // minimal Summary recorder (see internal/engine) distinguishes today —
 // the richer per-call detail in protocol.Result (status code, byte
 // counts) wires into a real report in Phase 1, not here.
-func protocolIteration(name string, target protocol.Target, timeout time.Duration, calls netapi.CallRecorder, plan *dataPlan) (engine.IterationFunc, func() error, error) {
+//
+// An http1 or http2 call is recorded under the endpoint row "METHOD path"
+// of the target, with the parts of the path that look like ids replaced by
+// {id} unless noURLGrouping.
+func protocolIteration(name string, target protocol.Target, timeout time.Duration, calls netapi.CallRecorder, plan *dataPlan, noURLGrouping bool) (engine.IterationFunc, func() error, error) {
 	spec, ok := findDriver(name)
 	if !ok {
 		return nil, nil, fmt.Errorf("%s", unknownProtocolMessage(name))
@@ -592,7 +605,7 @@ func protocolIteration(name string, target protocol.Target, timeout time.Duratio
 		return nil, nil, err
 	}
 
-	op := protocolOp(driver.Name(), target.Options)
+	op := protocolOp(driver.Name(), target, noURLGrouping)
 	call := func(ctx context.Context) (protocol.Result, xfercommon.Timing, bool, error) {
 		return doProtocol(driver, ctx)
 	}
@@ -645,13 +658,22 @@ func dataCall(ctx context.Context, spec driverSpec, base protocol.Protocol, plan
 	return doProtocol(next, ctx)
 }
 
-// protocolOp is the operation name for one -protocol call. It is the mode
-// option only when that mode is in the driver's own list. Anything else
-// uses the driver's own name, so a raw option string is never stored.
-func protocolOp(protocolName string, opts map[string]string) string {
+// protocolOp is the operation name for one -protocol call. For http1 and
+// http2 it is the endpoint row "METHOD path" of the target, the same row a
+// scenario's call to that URL gets. Otherwise it is the mode option only
+// when that mode is in the driver's own list. Anything else uses the
+// driver's own name, so a raw option string is never stored.
+func protocolOp(protocolName string, target protocol.Target, noURLGrouping bool) string {
+	if report.IsHTTP(protocolName) {
+		p := urlname.Path(target.URL)
+		if !noURLGrouping {
+			p = urlname.Fold(p)
+		}
+		return urlname.Row(target.Method, p)
+	}
 	mode := ""
-	if opts != nil {
-		mode = opts["mode"]
+	if target.Options != nil {
+		mode = target.Options["mode"]
 	}
 	spec, ok := findDriver(protocolName)
 	if mode != "" && ok && spec.hasMode(mode) {
@@ -718,6 +740,9 @@ func scriptedIteration(cfg *runConfig, concurrency int) (engine.IterationFunc, f
 		if cfg.NoConnectionReuse {
 			opts = append(opts, python.WithNoConnectionReuse())
 		}
+		if cfg.NoURLGrouping {
+			opts = append(opts, python.WithNoURLGrouping())
+		}
 		pool := newVUPool(concurrency, func() (iterCloser, error) {
 			vu, err := script.NewVU(check, cfg.Timeout, opts...)
 			if err != nil {
@@ -745,6 +770,9 @@ func scriptedIteration(cfg *runConfig, concurrency int) (engine.IterationFunc, f
 	opts := []js.Option{js.WithInputs(cfg.Inputs)}
 	if cfg.NoConnectionReuse {
 		opts = append(opts, js.WithNoConnectionReuse())
+	}
+	if cfg.NoURLGrouping {
+		opts = append(opts, js.WithNoURLGrouping())
 	}
 	pool := newVUPool(concurrency, func() (iterCloser, error) {
 		vu, err := script.NewVU(check, cfg.Timeout, opts...)
@@ -1237,6 +1265,7 @@ func printResult(w io.Writer, r *report.Result) {
 	printIterations(w, r)
 	printChecks(w, r)
 	printSteps(w, r)
+	printEndpoints(w, r)
 	printDataFiles(w, r)
 	printProtocols(w, r)
 	printThresholds(w, r)
@@ -1337,8 +1366,29 @@ func printSteps(w io.Writer, r *report.Result) {
 	}
 }
 
+// printEndpoints writes one line per HTTP endpoint row, "METHOD name", for
+// any run that made HTTP calls. Every row is shown: there are at most
+// report.MaxEndpoints and the Other row.
+func printEndpoints(w io.Writer, r *report.Result) {
+	rows := report.Endpoints(r)
+	if len(rows) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "\nendpoints")
+	for _, op := range rows {
+		status := "PASS"
+		if op.Failed > 0 {
+			status = "FAIL"
+		}
+		fmt.Fprintf(w, "  %s  %s  %d calls, %d failed (%.2f%%)  p50 %s  p95 %s  max %s\n",
+			status, op.Name, op.Total, op.Failed, op.ErrorRate*100,
+			op.Latency.P50.Round(time.Microsecond), op.Latency.P95.Round(time.Microsecond), op.Latency.Max.Round(time.Microsecond))
+	}
+}
+
 // printProtocols writes the per-protocol block. A plain HTTP run does not
-// show it, so that summary stays the same as before.
+// show it, so that summary stays the same as before. An HTTP protocol's
+// rows are in the endpoints block instead.
 func printProtocols(w io.Writer, r *report.Result) {
 	if !report.ShowProtocols(r) {
 		return
@@ -1346,6 +1396,9 @@ func printProtocols(w io.Writer, r *report.Result) {
 	fmt.Fprintln(w, "\nprotocols")
 	for _, p := range r.Protocols {
 		printCallLine(w, "", p.Name, p.Total, p.Failed, p.ErrorRate, p.Latency, p.BytesSent, p.BytesReceived)
+		if report.IsHTTP(p.Name) {
+			continue
+		}
 		for _, op := range p.Operations {
 			printCallLine(w, "  ", op.Name, op.Total, op.Failed, op.ErrorRate, op.Latency, op.BytesSent, op.BytesReceived)
 		}

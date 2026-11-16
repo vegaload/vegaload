@@ -55,6 +55,7 @@ func renderHTML(res *Result) string {
 	b.WriteString(baselineSection(res))
 	b.WriteString(checksSection(res))
 	b.WriteString(stepsSection(res))
+	b.WriteString(endpointsSection(res))
 	b.WriteString(protocolsSection(res))
 
 	fmt.Fprintf(&b, "<section class=\"latency\">\n<h2>Latency</h2>\n<table>\n<tr><th>min</th><th>p50</th><th>p90</th><th>p95</th><th>p99</th><th>max</th><th>mean</th></tr>\n")
@@ -235,8 +236,32 @@ func stepsSection(res *Result) string {
 	return b.String()
 }
 
+// endpointsSection is the table of HTTP rows, one per "METHOD name", for
+// any run that made HTTP calls.
+func endpointsSection(res *Result) string {
+	rows := Endpoints(res)
+	if len(rows) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("<section class=\"endpoints\">\n<h2>Endpoints</h2>\n")
+	b.WriteString("<table>\n<tr><th>result</th><th>endpoint</th><th>calls</th><th>failed</th><th>error rate</th><th>p50</th><th>p95</th><th>max</th></tr>\n")
+	for _, op := range rows {
+		word, cls := "PASS", "pass"
+		if op.Failed > 0 {
+			word, cls = "FAIL", "fail"
+		}
+		fmt.Fprintf(&b, "<tr><td><span class=\"badge %s\">%s</span></td><td>%s</td><td>%d</td><td>%d</td><td>%.2f%%</td><td>%s</td><td>%s</td><td>%s</td></tr>\n",
+			cls, word, html.EscapeString(op.Name), op.Total, op.Failed, op.ErrorRate*100,
+			op.Latency.P50.Round(1e3), op.Latency.P95.Round(1e3), op.Latency.Max.Round(1e3))
+	}
+	b.WriteString("</table>\n</section>\n")
+	return b.String()
+}
+
 // protocolsSection is the per-protocol table. A plain HTTP run does not
-// show it, so that report stays the same as before. Strings are escaped.
+// show it, so that report stays the same as before. An HTTP protocol's
+// rows are in the endpoints table instead. Strings are escaped.
 // Operations are indented rows. Measures sit in a second table under the
 // protocol. The markup uses the classes the steps table already uses.
 func protocolsSection(res *Result) string {
@@ -248,6 +273,9 @@ func protocolsSection(res *Result) string {
 	b.WriteString("<table>\n<tr><th>result</th><th>protocol</th><th>calls</th><th>failed</th><th>error rate</th><th>p50</th><th>p95</th><th>max</th><th>sent</th><th>received</th></tr>\n")
 	for _, p := range res.Protocols {
 		writeCallRow(&b, html.EscapeString(p.Name), p.Total, p.Failed, p.ErrorRate, p.Latency, p.BytesSent, p.BytesReceived)
+		if IsHTTP(p.Name) {
+			continue
+		}
 		for _, op := range p.Operations {
 			writeCallRow(&b, "&nbsp;&nbsp;"+html.EscapeString(op.Name), op.Total, op.Failed, op.ErrorRate, op.Latency, op.BytesSent, op.BytesReceived)
 		}

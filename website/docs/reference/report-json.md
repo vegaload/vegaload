@@ -148,7 +148,7 @@ An iteration is one run of the scenario's default function (or `iteration()` in 
 | `latency` | The latency summary. |
 | `bytes_sent`, `bytes_received` | Bytes moved. |
 | `bytes_per_second` | Throughput. |
-| `operations[]` | One entry per kind of call, such as `GET`. Each has `name`, `total`, `failed`, `error_rate`, `latency`, `bytes_sent` and `bytes_received`. |
+| `operations[]` | One entry per kind of call, such as ftp `roundtrip`. Each has `name`, `total`, `failed`, `error_rate`, `latency`, `bytes_sent` and `bytes_received`. For `http`, `http1` and `http2`, each entry is one endpoint row: `name` is `METHOD name`, such as `GET /users/{id}`, and `method` and `endpoint` hold its two parts. There are at most 500 such rows. The calls past them are in one row named `Other`, which has no `method` or `endpoint`. |
 | `measures[]` | Phase times inside the protocol, such as ftp `connect_time`. Each has `name`, `count` and `latency`. Present when the protocol records them. |
 
 ## `checks[]`

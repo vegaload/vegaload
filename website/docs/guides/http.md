@@ -124,6 +124,52 @@ res = http.get("http://127.0.0.1:8080/widgets",
 
 A value of the wrong type throws an error the script can catch, and no request is sent.
 
+### Endpoint rows
+
+The report has one row per endpoint: the method and a name, such as `GET /users/{id}`. Each row has its own calls, failures, error rate and latency. The terminal summary, the HTML report and the GitHub step summary show them under `endpoints`. See [Read the report](/get-started/read-the-report).
+
+The name of a call is, in this order:
+
+1. its `name` option, or the name `http.url` gives it,
+2. else the name of the innermost `group()` it runs in (see [Groups](/guides/scenarios#groups)),
+3. else the path of its URL, without the query or the fragment.
+
+In a path, a part that is all digits, a UUID, or 16 or more hex digits becomes `{id}`. So `/users/1` to `/users/1000` are one row, `GET /users/{id}`. A short part such as `/v2/abc` stays as it is. Add `-no-url-grouping` to keep every path as written.
+
+Name a call yourself when other parts of its URL change:
+
+```js
+http.get(`${base}/users/${user}/posts`, { name: "/users/{user}/posts" });
+```
+
+```python
+http.get(f"{base}/users/{user}/posts", name="/users/{user}/posts")
+```
+
+`http.url` names the row after the URL as you wrote it. In JavaScript it is a tagged template. Each value in the path shows as `${}`:
+
+```js
+http.get(http.url`http://127.0.0.1:8080/users/${id}`); // row: GET /users/${}
+```
+
+Python has no tagged templates. `http.url` takes a template with `{}` placeholders, then the values. The row is the same as in JavaScript:
+
+```python
+http.get(http.url("http://127.0.0.1:8080/users/{}", user_id))  # row: GET /users/${}
+```
+
+`String()` of the value (Python: `str()`) is the URL. A `name` option wins over the `http.url` name.
+
+A `-protocol http1` or `http2` run has one row: `-method` and the path of `-target`, with the same `{id}` rule.
+
+A run keeps at most 500 rows. The calls to any more names are counted in one row, `Other`, so the totals stay right.
+
+Gate on one row with a threshold. In a scenario the protocol is `http`. In a `-protocol` run it is `http1` or `http2`:
+
+```bash
+vegaload run -threshold 'p95{protocol="http",op="GET /users/{id}"} < 300ms' scenario.vl.js
+```
+
 ## Start from what you have
 
 - From an OpenAPI file: `vegaload new -from-openapi openapi.json`. See the [cookbook recipe](/cookbook/start-from-an-openapi-spec).

@@ -92,7 +92,7 @@ func TestHTTP_RecordsAndSkipsRefused(t *testing.T) {
 		t.Fatalf("do: %v %+v", err, resp)
 	}
 	p, ok := col.Finish("fixed-vus", time.Second).Protocol("http")
-	if !ok || p.Total != 1 || p.Failed != 0 || p.Operations[0].Name != "GET" || p.BytesSent != 2 || p.BytesReceived != 6 {
+	if !ok || p.Total != 1 || p.Failed != 0 || p.Operations[0].Name != "GET /" || p.BytesSent != 2 || p.BytesReceived != 6 {
 		t.Fatalf("%+v ok %v", p, ok)
 	}
 
@@ -124,8 +124,8 @@ func TestHTTP_RecordsAndSkipsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	op := fresh.Finish("fixed-vus", time.Second).Protocols[0].Operations[0].Name
-	if op != "OTHER" {
-		t.Fatalf("verb = %s, want OTHER", op)
+	if op != "OTHER /" {
+		t.Fatalf("verb = %s, want OTHER /", op)
 	}
 }
 

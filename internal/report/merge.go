@@ -143,7 +143,7 @@ func Merge(rs []*Result) (*Result, error) {
 			mp.sent += p.BytesSent
 			mp.received += p.BytesReceived
 			for _, o := range p.Operations {
-				mo := mp.ops.get(o.Name, newMergedRuns)
+				mo := mp.ops.get(mp.opName(p.Name, o.Name), newMergedRuns)
 				mo.add(o.Total, o.Failed, o.Latency)
 				mo.sent += o.BytesSent
 				mo.received += o.BytesReceived
@@ -184,10 +184,10 @@ func Merge(rs []*Result) (*Result, error) {
 		}
 		for _, on := range mp.ops.order {
 			o := mp.ops.items[on]
-			pr.Operations = append(pr.Operations, OperationResult{
+			pr.Operations = append(pr.Operations, withEndpoint(name, OperationResult{
 				Name: on, Total: o.total, Failed: o.failed, ErrorRate: rateOf(o.failed, o.total),
 				Latency: latencyOf(o.h), BytesSent: o.sent, BytesReceived: o.received,
-			})
+			}))
 		}
 		for _, mn := range mp.measures.order {
 			m := mp.measures.items[mn]
@@ -221,6 +221,26 @@ type mergedProto struct {
 
 func newMergedProto() *mergedProto {
 	return &mergedProto{mergedRuns: *newMergedRuns(), ops: newOrdered[*mergedRuns](), measures: newOrdered[*mergedRuns]()}
+}
+
+// opName is the merged row an operation goes in. An HTTP protocol keeps
+// MaxEndpoints named rows, as one run does, and the rest share the Other
+// row, so merged reports that each reached the cap stay capped.
+func (mp *mergedProto) opName(protocol, name string) string {
+	if !IsHTTP(protocol) {
+		return name
+	}
+	if _, seen := mp.ops.items[name]; seen {
+		return name
+	}
+	named := len(mp.ops.order)
+	if _, ok := mp.ops.items[OtherEndpoints]; ok {
+		named--
+	}
+	if name != OtherEndpoints && named >= MaxEndpoints {
+		return OtherEndpoints
+	}
+	return name
 }
 
 // ordered is a map that remembers the order its keys were first seen in.

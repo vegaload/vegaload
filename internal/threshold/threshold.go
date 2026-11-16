@@ -164,19 +164,25 @@ func selectorFormError() error {
 // parseSelector reads a selector from the start of s and returns the step,
 // protocol and operation, plus the text after the closing brace. A name may
 // be in double or single quotes, or bare when it has no spaces or braces.
-// The keys are case sensitive.
+// A quoted name may hold spaces, slashes and braces, such as the HTTP row
+// op="GET /users/{id}". The keys are case sensitive.
 func parseSelector(s string) (step, protocol, operation, rest string, err error) {
-	end := strings.Index(s, "}")
-	if q := strings.IndexAny(s, "\"'"); q >= 0 && (end < 0 || q < end) {
-		// A quoted name may contain '}' so look for the closing quote first.
-		closeQ := strings.IndexByte(s[q+1:], s[q])
-		if closeQ < 0 {
-			return "", "", "", "", fmt.Errorf("the selector is missing its closing quote")
+	end := -1
+	var quote byte
+	for i := 1; i < len(s) && end < 0; i++ {
+		switch c := s[i]; {
+		case quote != 0:
+			if c == quote {
+				quote = 0
+			}
+		case c == '"' || c == '\'':
+			quote = c
+		case c == '}':
+			end = i
 		}
-		end = strings.Index(s[q+1+closeQ:], "}")
-		if end >= 0 {
-			end += q + 1 + closeQ
-		}
+	}
+	if quote != 0 {
+		return "", "", "", "", fmt.Errorf("the selector is missing its closing quote")
 	}
 	if end < 0 {
 		return "", "", "", "", fmt.Errorf("the selector is missing its closing '}'")
