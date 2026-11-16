@@ -186,6 +186,7 @@ vegaload import har <recording.har> [flags]
 | `-include-static` | Keep images, fonts, style sheets and scripts. |
 | `-include-third-party` | Keep requests to other sites. |
 | `-max` | Stop after this many requests. |
+| `-think-time` | The `sleep()` between requests: `none`, `recorded` (default: the gaps in the recording), `capped:5s` (recorded, at most 5s) or `fixed:1s` (1s each time). Gaps under 10ms are not written. |
 | `-force` | Overwrite the scenario file if it exists. |
 | `-output` | `text` or `json`. |
 

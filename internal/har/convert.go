@@ -5,9 +5,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
+	"unicode/utf8"
+
+	"github.com/vegaload/vegaload/internal/urlname"
 )
 
 // part is a piece of a JavaScript string built from text and expressions.
@@ -46,6 +52,20 @@ type request struct {
 	respHeaders []nameValue
 	cookies     []cookiePair
 	emits       []emit // consts taken from this response
+	name        string // the report row's name: the path, with {id}
+	sleep       time.Duration
+	multipart   *multipartBody
+}
+
+// multipartBody is a multipart form rebuilt from the recording.
+type multipartBody struct {
+	boundary string
+	parts    []formPart
+}
+
+type formPart struct {
+	name, fileName, contentType string
+	value                       []part
 }
 
 // jsExpr is a raw JavaScript expression inside a JSON value.
@@ -468,6 +488,9 @@ func Convert(r io.Reader, source string, opt Options) (*Result, error) {
 	b := &builder{env: map[string]bool{}}
 	hosts := map[string]bool{}
 	var reqs []*request
+	// prevEnd is when the last kept request ended. The requests left out
+	// in between do not shorten the wait before the next kept one.
+	var prevEnd time.Time
 	for _, c := range cands {
 		if ok, why := keepHost(c.u.Host); !ok {
 			skip(why)
@@ -481,7 +504,17 @@ func Convert(r io.Reader, source string, opt Options) (*Result, error) {
 			skip(skipLimit)
 			continue
 		}
-		reqs = append(reqs, b.request(len(reqs), c.e, c.u, f))
+		q := b.request(len(reqs), c.e, c.u, f)
+		started, timed := startTime(c.e)
+		var gap time.Duration
+		if timed && !prevEnd.IsZero() {
+			gap = started.Sub(prevEnd)
+		}
+		q.sleep = opt.ThinkTime.wait(gap, len(reqs) == 0)
+		if timed {
+			prevEnd = started.Add(time.Duration(c.e.Time * float64(time.Millisecond)))
+		}
+		reqs = append(reqs, q)
 		hosts[c.u.Host] = true
 	}
 
@@ -493,8 +526,20 @@ func Convert(r io.Reader, source string, opt Options) (*Result, error) {
 	for _, q := range reqs {
 		res.Todos += len(q.notes)
 	}
-	res.Script = render(source, reqs, res)
+	res.Script = render(source, reqs, res, opt.ThinkTime)
 	return res, nil
+}
+
+// startTime is when an entry started, if the recording says.
+func startTime(e *entry) (time.Time, bool) {
+	if e.StartedDateTime == "" {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339Nano, e.StartedDateTime)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
 }
 
 // request converts one entry.
@@ -508,12 +553,11 @@ func (b *builder) request(idx int, e *entry, u *url.URL, f *file) *request {
 	if u.Path == "" {
 		q.label = q.method + " /"
 	}
+	q.name = urlname.Fold(urlname.Path(e.Request.URL))
+	q.page = e.Pageref
 	for _, p := range f.Log.Pages {
-		if p.ID == e.Pageref && e.Pageref != "" {
+		if p.ID == e.Pageref && p.Title != "" {
 			q.page = p.Title
-			if q.page == "" {
-				q.page = p.ID
-			}
 		}
 	}
 	if q.method != "GET" && q.method != "HEAD" {
@@ -539,8 +583,14 @@ func (b *builder) body(q *request, e *entry) {
 	mime := pd.MimeType
 	switch {
 	case isMultipart(mime):
-		q.notes = append(q.notes, "the body was a multipart form. It was left out. Build it by hand.")
-		return
+		mp := b.multipart(q, pd.MimeType, pd.Text, pd.Params)
+		if mp == nil {
+			q.notes = append(q.notes, "the body was a multipart form that could not be read. It was left out. Build it by hand.")
+			return
+		}
+		q.multipart = mp
+		q.hasBody = true
+		setHeader(q, "Content-Type", "multipart/form-data; boundary="+mp.boundary)
 	case pd.Text == "" && len(pd.Params) > 0 && isFormType(mime):
 		var prs [][2]string
 		for _, p := range pd.Params {
@@ -570,6 +620,70 @@ func (b *builder) body(q *request, e *entry) {
 		q.text = []part{{lit: pd.Text}}
 		q.hasBody = true
 	}
+}
+
+// multipart rebuilds a multipart form from its recorded fields, or from the
+// recorded text when there are none. It returns nil when neither can be
+// read. A file whose content the recording does not have gets a
+// placeholder and a TODO.
+func (b *builder) multipart(q *request, mimeType, text string, params []param) *multipartBody {
+	if len(params) == 0 {
+		params = readMultipart(mimeType, text)
+		if params == nil {
+			return nil
+		}
+	}
+	mp := &multipartBody{boundary: fmt.Sprintf("vegaload-form-%d", b.cur+1)}
+	for _, p := range params {
+		fp := formPart{name: p.Name, fileName: p.FileName, contentType: p.ContentType}
+		switch {
+		case p.FileName != "" && (p.Value == "" || !utf8.ValidString(p.Value)):
+			fp.value = []part{{lit: "REPLACE WITH THE CONTENT OF " + p.FileName}}
+			q.notes = append(q.notes, fmt.Sprintf("the file %q of the form field %q is not in the recording. Put its content in value.", p.FileName, p.Name))
+		case p.FileName == "" && isSecretName(p.Name):
+			fp.value = []part{b.secret(p.Name)}
+		default:
+			fp.value = []part{{lit: p.Value}}
+		}
+		mp.parts = append(mp.parts, fp)
+	}
+	return mp
+}
+
+// readMultipart reads the fields of a recorded multipart text, or nil.
+func readMultipart(mimeType, text string) []param {
+	_, mt, err := mime.ParseMediaType(mimeType)
+	if err != nil || mt["boundary"] == "" || text == "" {
+		return nil
+	}
+	r := multipart.NewReader(strings.NewReader(text), mt["boundary"])
+	var out []param
+	for {
+		p, err := r.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil
+		}
+		body, err := io.ReadAll(p)
+		if err != nil {
+			return nil
+		}
+		out = append(out, param{Name: p.FormName(), Value: string(body), FileName: p.FileName(), ContentType: p.Header.Get("Content-Type")})
+	}
+	return out
+}
+
+// setHeader sets a request header, replacing one of the same name.
+func setHeader(q *request, name, value string) {
+	for i, h := range q.headers {
+		if strings.EqualFold(h.name, name) {
+			q.headers[i].val = []part{{lit: value}}
+			return
+		}
+	}
+	q.headers = append(q.headers, header{name: name, val: []part{{lit: value}}})
 }
 
 func looksJSON(s string) bool {

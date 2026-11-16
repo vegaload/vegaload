@@ -27,11 +27,15 @@
 //     id. Two places of the same kind, including two JSON fields, stay in
 //     the file with a TODO, and an older response is not used. A password
 //     or an API key is still read from the environment.
+//   - It writes a sleep() before each request for the time the person
+//     waited (see ThinkTime), a group() for each page, and names each call's
+//     report row after its path, with {id} where a part looks like an id.
+//   - It rebuilds a multipart form from its recorded fields. A file whose
+//     content is not in the recording gets a placeholder and a TODO.
 //
 // It does not guess a flow: it keeps the recorded order and one call per
-// request. It writes no waits between calls, because the scenario API has
-// no sleep. It does not import WebSocket frames or multipart bodies; it
-// says so in a TODO where that happens.
+// request. It does not import WebSocket frames; it says so in a TODO where
+// that happens.
 package har
 
 import (
@@ -44,6 +48,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Options controls what Convert keeps.
@@ -58,6 +63,101 @@ type Options struct {
 	IncludeThirdParty bool
 	// MaxRequests stops after this many requests. 0 means no limit.
 	MaxRequests int
+	// ThinkTime is how the waits between requests are written. The zero
+	// value is ThinkRecorded.
+	ThinkTime ThinkTime
+}
+
+// ThinkMode says how Convert writes the waits between requests.
+type ThinkMode int
+
+const (
+	// ThinkRecorded waits as long as the person did: the gap between the
+	// end of one kept request and the start of the next.
+	ThinkRecorded ThinkMode = iota
+	// ThinkNone writes no waits.
+	ThinkNone
+	// ThinkCapped waits as recorded, but never longer than ThinkTime.Max.
+	ThinkCapped
+	// ThinkFixed waits ThinkTime.Max between every two requests.
+	ThinkFixed
+)
+
+// ThinkTime is the -think-time choice.
+type ThinkTime struct {
+	Mode ThinkMode
+	Max  time.Duration // the cap, or the fixed wait
+}
+
+// ParseThinkTime reads none, recorded, capped:DURATION or fixed:DURATION.
+func ParseThinkTime(s string) (ThinkTime, error) {
+	mode, dur, hasDur := strings.Cut(s, ":")
+	var tt ThinkTime
+	switch mode {
+	case "recorded":
+		tt.Mode = ThinkRecorded
+	case "none":
+		tt.Mode = ThinkNone
+	case "capped":
+		tt.Mode = ThinkCapped
+	case "fixed":
+		tt.Mode = ThinkFixed
+	default:
+		return tt, fmt.Errorf("%q: want none, recorded, capped:5s or fixed:1s", s)
+	}
+	needDur := tt.Mode == ThinkCapped || tt.Mode == ThinkFixed
+	if hasDur != needDur {
+		return tt, fmt.Errorf("%q: want none, recorded, capped:5s or fixed:1s", s)
+	}
+	if needDur {
+		d, err := time.ParseDuration(dur)
+		if err != nil || d < 0 {
+			return tt, fmt.Errorf("%q: %q is not a duration like 5s", s, dur)
+		}
+		tt.Max = d
+	}
+	return tt, nil
+}
+
+// String is the -think-time text of tt.
+func (tt ThinkTime) String() string {
+	switch tt.Mode {
+	case ThinkNone:
+		return "none"
+	case ThinkCapped:
+		return "capped:" + tt.Max.String()
+	case ThinkFixed:
+		return "fixed:" + tt.Max.String()
+	default:
+		return "recorded"
+	}
+}
+
+// minThink is the shortest wait written. A shorter gap is the browser, not
+// a person.
+const minThink = 10 * time.Millisecond
+
+// wait is how long to sleep before a request that started gap after the
+// previous kept request ended. 0 means no sleep.
+func (tt ThinkTime) wait(gap time.Duration, first bool) time.Duration {
+	if first {
+		return 0
+	}
+	var d time.Duration
+	switch tt.Mode {
+	case ThinkNone:
+		return 0
+	case ThinkFixed:
+		d = tt.Max
+	case ThinkCapped:
+		d = min(gap, tt.Max)
+	default:
+		d = gap
+	}
+	if d < minThink {
+		return 0
+	}
+	return d.Round(time.Millisecond)
 }
 
 // Result is the scenario and a summary of what was done.
@@ -76,17 +176,30 @@ type nameValue struct {
 	Value string `json:"value"`
 }
 
+// param is one field of a recorded form. FileName and ContentType are set
+// for a file in a multipart form.
+type param struct {
+	Name        string `json:"name"`
+	Value       string `json:"value"`
+	FileName    string `json:"fileName"`
+	ContentType string `json:"contentType"`
+}
+
 type entry struct {
 	Pageref      string `json:"pageref"`
 	ResourceType string `json:"_resourceType"`
-	Request      struct {
+	// StartedDateTime and Time (milliseconds) are when the request started
+	// and how long it took, for the waits between requests.
+	StartedDateTime string  `json:"startedDateTime"`
+	Time            float64 `json:"time"`
+	Request         struct {
 		Method   string      `json:"method"`
 		URL      string      `json:"url"`
 		Headers  []nameValue `json:"headers"`
 		PostData *struct {
-			MimeType string      `json:"mimeType"`
-			Text     string      `json:"text"`
-			Params   []nameValue `json:"params"`
+			MimeType string  `json:"mimeType"`
+			Text     string  `json:"text"`
+			Params   []param `json:"params"`
 		} `json:"postData"`
 	} `json:"request"`
 	Response struct {
