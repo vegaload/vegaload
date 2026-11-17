@@ -101,9 +101,23 @@ func TestRampingArrivalRate_DropsWhenVUsSaturated(t *testing.T) {
 	if err := r.Run(context.Background(), iter, rec); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if rec.Total() < 2 || rec.Failed() == 0 {
-		t.Errorf("Total()=%d Failed()=%d, want dropped arrivals recorded as failures", rec.Total(), rec.Failed())
+	if rec.Total() != 1 || rec.Failed() != 0 || rec.Dropped() == 0 {
+		t.Errorf("Total()=%d Failed()=%d Dropped()=%d, want one iteration that ran, no failure, and the rest dropped", rec.Total(), rec.Failed(), rec.Dropped())
 	}
+}
+
+func TestRampingArrivalRate_DropIsRecordedAsDropped(t *testing.T) {
+	rec := &resultRec{}
+	block := make(chan struct{})
+	r := RampingArrivalRate{Stages: []Stage{{Target: 200, Duration: 60 * time.Millisecond}}, StartRate: 200, MaxVUs: 1}
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		close(block)
+	}()
+	if err := r.Run(context.Background(), func(context.Context) error { <-block; return nil }, rec); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	checkDrops(t, rec)
 }
 
 func TestRampingArrivalRate_StopsWithItsContext(t *testing.T) {

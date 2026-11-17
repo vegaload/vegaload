@@ -108,8 +108,9 @@ keeps at most 100 distinct step names; any more are counted together as
 ## Per-protocol results
 
 A scenario can mix HTTP, gRPC, WebSocket, SQL, MQTT, FTP and more. The report
-also shows one row per protocol, and under it one row per operation. The
-whole-run numbers stay as they are.
+also shows one row per protocol, and under it one row per operation. In a
+scenario run, the whole-run numbers are every call, so they add up to the
+protocol rows.
 
 | Protocol | Calls | Failed | Error rate | p50 | p95 | Max | Sent | Received |
 |----------|------:|-------:|-----------:|----:|----:|----:|-----:|---------:|
@@ -135,10 +136,12 @@ FTP and SFTP also record phase times: `connect_time`, `login_time`,
 1 ms is not counted. The times are whole milliseconds, and 0 means a reused
 connection.
 
-A script HTTP call counts as failed only on a transport error: the connection
-failed, it timed out, or the body could not be read. A 4xx or 5xx response
-counts as a success in the protocol row. Use `check()` on `r.status` to judge
-the status.
+A script HTTP call fails on a transport error (the connection failed, it timed
+out, or the body could not be read) and on a status of 400 or higher, the same
+rule as `-protocol http1`. A 2xx or 3xx answer is a success. To accept another
+status for one call, list the statuses it expects:
+`http.get(url, { expectedStatuses: [200, 404] })`, or in Python
+`http.get(url, expected_statuses=[200, 404])`.
 
 Gate on a protocol, or on one of its operations. The names are matched
 exactly (`ftp`, not `FTP`). `check_rate` cannot target a protocol. A protocol

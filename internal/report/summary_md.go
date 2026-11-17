@@ -28,6 +28,23 @@ func MarkdownSummary(res *Result) string {
 		fmt.Fprintf(&b, "\n**Aborted:** the run was stopped at %s because %s was broken (observed %s).\n",
 			a.At.Round(time.Millisecond), mdCell(a.Threshold), mdCell(a.Observed))
 	}
+	for _, w := range res.Warnings {
+		fmt.Fprintf(&b, "\n**Warning:** %s\n", mdCell(w))
+	}
+	if len(res.FailureReasons) > 0 {
+		b.WriteString("\n### Failures\n\n| Reason | Requests |\n|---|---:|\n")
+		for _, fr := range res.FailureReasons {
+			fmt.Fprintf(&b, "| %s | %d |\n", mdCell(fr.Reason), fr.Count)
+		}
+	}
+	if it := res.Iterations; it != nil {
+		fmt.Fprintf(&b, "\n### Iterations\n\nThe numbers above are each call the scenario made.\n\n| Result | Ran | Failed | Error rate | p50 | p95 | Max |\n|---|---:|---:|---:|---:|---:|---:|\n| %s | %d | %d | %.2f%% | %s | %s | %s |\n",
+			passWord(it.Failed == 0), it.Total, it.Failed, it.ErrorRate*100,
+			it.Duration.P50.Round(time.Microsecond), it.Duration.P95.Round(time.Microsecond), it.Duration.Max.Round(time.Microsecond))
+	}
+	if res.DroppedIterations > 0 {
+		fmt.Fprintf(&b, "\n%d iterations were dropped because every VU was busy. They are not in the numbers above.\n", res.DroppedIterations)
+	}
 	if len(res.DataFiles) > 0 {
 		b.WriteString("\n### Data files\n\n")
 		for _, f := range res.DataFiles {

@@ -173,6 +173,31 @@ func TestConvert_ExpectedStatus(t *testing.T) {
 	}
 }
 
+// A status the recording had at 400 or above is what the call expects, so
+// the generated call lists it in expectedStatuses; a lower one does not.
+func TestConvert_RecordedErrorStatusIsExpected(t *testing.T) {
+	in := harOf(t,
+		[5]string{"GET", "https://app.example.com/", "document", "200", ""},
+		[5]string{"GET", "https://app.example.com/api/items/9", "xhr", "404", ""},
+		[5]string{"GET", "https://app.example.com/api/flaky", "xhr", "503", ""},
+	)
+	res, err := Convert(strings.NewReader(in), "x.har", Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"const r2 = http.get(\"https://app.example.com/api/items/9\", {\n    expectedStatuses: [404],\n  });",
+		"const r3 = http.get(\"https://app.example.com/api/flaky\", {\n    expectedStatuses: [503],\n  });",
+	} {
+		if !strings.Contains(res.Script, want) {
+			t.Errorf("missing %q in:\n%s", want, res.Script)
+		}
+	}
+	if strings.Count(res.Script, "expectedStatuses") != 2 {
+		t.Errorf("expectedStatuses should be on the 404 and 503 calls only:\n%s", res.Script)
+	}
+}
+
 func TestConvert_MultipartBodyIsLeftOutWithANote(t *testing.T) {
 	res := convertShop(t, "shop.example.com", Options{})
 	if !strings.Contains(res.Script, "multipart form") || strings.Contains(res.Script, "--x") {

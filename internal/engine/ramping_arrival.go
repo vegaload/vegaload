@@ -21,8 +21,8 @@ const rampingArrivalTick = 5 * time.Millisecond
 // It answers "what happens as the arrival rate climbs, spikes and falls",
 // and like ConstantArrivalRate it does not throttle when the target is
 // slow: iterations keep arriving on schedule, up to MaxVUs running at
-// once, and an arrival beyond that is dropped and recorded as a failed
-// iteration with VUID -1.
+// once, and an arrival beyond that is dropped and recorded with Dropped
+// set.
 type RampingArrivalRate struct {
 	// StartRate is the rate, in iterations per second, at the start of
 	// the first stage. Zero means the first stage ramps up from nothing.
@@ -121,12 +121,7 @@ func (r RampingArrivalRate) Run(ctx context.Context, iter IterationFunc, rec Rec
 				}
 			}()
 		default:
-			rec.Record(IterationResult{
-				VUID:     -1,
-				Start:    at,
-				Duration: 0,
-				Err:      fmt.Errorf("engine: dropped iteration, all %d VUs busy", maxVUs),
-			})
+			recordDrop(rec, at)
 		}
 	}
 

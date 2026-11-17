@@ -46,6 +46,7 @@ import (
 	"github.com/vegaload/vegaload/internal/audit"
 	"github.com/vegaload/vegaload/internal/compare"
 	"github.com/vegaload/vegaload/internal/engine"
+	"github.com/vegaload/vegaload/internal/failure"
 	"github.com/vegaload/vegaload/internal/inputs"
 	"github.com/vegaload/vegaload/internal/live"
 	"github.com/vegaload/vegaload/internal/protocol"
@@ -223,7 +224,7 @@ func parseRunArgs(args []string) (*runConfig, error) {
 	fs.StringVar(&method, "method", "", "HTTP verb, or the full gRPC method (e.g. /package.Service/Method)")
 	fs.StringVar(&bodyRaw, "body", "", "request body")
 	fs.BoolVar(&insecure, "insecure", false, "skip TLS certificate verification")
-	fs.DurationVar(&cfg.Timeout, "timeout", 30*time.Second, "per-iteration timeout")
+	fs.DurationVar(&cfg.Timeout, "timeout", 30*time.Second, "time limit for each request: each -protocol call, or each call a scenario makes. A request that runs out of time fails with the reason \"timeout\"")
 	fs.StringVar(&cfg.OutPath, "out", "", "also write a JSON summary to this path")
 	fs.Var(headers, "header", "request header \"Key: Value\" (repeatable)")
 	fs.Var(options, "opt", "driver option key=value, e.g. -opt read=64 (repeatable; each protocol lists its own keys)")
@@ -446,6 +447,40 @@ func buildExecutor(cfg *runConfig) (engine.Executor, error) {
 	}
 }
 
+// plannedDuration is how long cfg's load shape runs, as its executor
+// reports it: -duration for fixed-vus and constant-arrival-rate, the sum
+// of -stages for the others. The text output, the JSONL run_started line,
+// the audit log, the stream and the safety caps all read it, so they show
+// the same length. A shape the executor cannot be built from falls back to
+// -duration; the run itself then fails with the executor's error.
+func plannedDuration(cfg *runConfig) time.Duration {
+	if ex, err := buildExecutor(cfg); err == nil {
+		return ex.Duration()
+	}
+	return cfg.Duration
+}
+
+// shapeSummary is the load shape on the line the text output starts with.
+// It reads the same values as the stream's run.started.
+func shapeSummary(cfg *runConfig) string {
+	rs := buildRunStarted(cfg, cfg.Executor, plannedDuration(cfg))
+	var parts []string
+	switch cfg.Executor {
+	case "constant-arrival-rate", "ramping-arrival-rate":
+		rate := "rate"
+		if cfg.Executor == "ramping-arrival-rate" {
+			rate = "peak rate"
+		}
+		// The engine runs one VU when -max-vus is not given.
+		parts = append(parts, fmt.Sprintf("%s=%g/s", rate, rs.Rate), fmt.Sprintf("max-vus=%d", max(rs.VUs, 1)))
+	case "ramp", "step":
+		parts = append(parts, fmt.Sprintf("peak vus=%d", rs.VUs))
+	default:
+		parts = append(parts, fmt.Sprintf("vus=%d", rs.VUs))
+	}
+	return strings.Join(append(parts, "duration="+rs.Duration), ", ")
+}
+
 // concurrencyHint estimates how many VUs can be running cfg's executor
 // at once, used to size the scripting VU pool (see vupool.go) — it does
 // not need to be exact, only a reasonable upper bound, since the pool
@@ -541,45 +576,42 @@ func protocolIteration(name string, target protocol.Target, timeout time.Duratio
 	}
 
 	op := protocolOp(driver.Name(), target.Options)
-	if plan == nil {
-		iter := func(ctx context.Context) error {
-			start := time.Now()
-			res, timing, timed, err := doProtocol(driver, ctx)
-			if recordDriverCall(calls, ctx, driver.Name(), op, time.Since(start), res, err) && timed {
-				netapi.RecordXferMeasures(calls, driver.Name(), op, res.Success, netapi.XferTimingFrom(timing))
-			}
-			if err != nil {
-				return err
-			}
-			if !res.Success {
-				if res.Err != nil {
-					return res.Err
-				}
-				return fmt.Errorf("%s: request failed (status %d)", driver.Name(), res.StatusCode)
-			}
-			return nil
-		}
-		return iter, driver.Close, nil
+	call := func(ctx context.Context) (protocol.Result, xfercommon.Timing, bool, error) {
+		return doProtocol(driver, ctx)
 	}
-
+	if plan != nil {
+		call = func(ctx context.Context) (protocol.Result, xfercommon.Timing, bool, error) {
+			return dataCall(ctx, spec, driver, plan, timeout)
+		}
+	}
 	iter := func(ctx context.Context) error {
 		start := time.Now()
-		res, timing, timed, err := dataCall(ctx, spec, driver, plan, timeout)
+		res, timing, timed, err := call(ctx)
 		if recordDriverCall(calls, ctx, driver.Name(), op, time.Since(start), res, err) && timed {
 			netapi.RecordXferMeasures(calls, driver.Name(), op, res.Success, netapi.XferTimingFrom(timing))
 		}
 		if err != nil {
 			return err
 		}
-		if !res.Success {
-			if res.Err != nil {
-				return res.Err
-			}
-			return fmt.Errorf("%s: request failed (status %d)", driver.Name(), res.StatusCode)
-		}
-		return nil
+		return driverFailure(driver.Name(), res)
 	}
 	return iter, driver.Close, nil
+}
+
+// driverFailure is why one -protocol call failed, or nil when it worked. A
+// failed call with no error of its own failed on its status, and the
+// error says so in a way the report can name (internal/failure).
+func driverFailure(driverName string, res protocol.Result) error {
+	switch {
+	case res.Success:
+		return nil
+	case res.Err != nil:
+		return res.Err
+	case res.StatusCode != 0:
+		return fmt.Errorf("%s: request failed: %w", driverName, failure.Status(res.StatusCode))
+	default:
+		return fmt.Errorf("%s: request failed", driverName)
+	}
 }
 
 // dataCall draws one row, fills the placeholders, and runs that one call.
@@ -631,17 +663,13 @@ func recordDriverCall(rec netapi.CallRecorder, ctx context.Context, protocolName
 	if rec == nil || driverRefused(res) {
 		return false
 	}
-	if err != nil {
-		if netapi.RunEnded(ctx) {
-			return false
-		}
-		rec.RecordCall(protocolName, op, d, true, res.BytesSent, res.BytesReceived)
-		return true
+	if err == nil {
+		err = driverFailure(protocolName, res)
 	}
-	if !res.Success && netapi.RunEnded(ctx) {
+	if err != nil && netapi.RunEnded(ctx) {
 		return false
 	}
-	rec.RecordCall(protocolName, op, d, !res.Success, res.BytesSent, res.BytesReceived)
+	rec.RecordCall(protocolName, op, d, err, res.BytesSent, res.BytesReceived)
 	return true
 }
 
@@ -730,6 +758,11 @@ func runScenarioWithCollector(cfg *runConfig, collector *report.Collector) (*rep
 	cfg.checkRecorder = collector
 	cfg.stepRecorder = collector
 	cfg.callRecorder = collector
+	// A scenario's iteration can make any number of calls, so each call,
+	// not each iteration, is one request of the run.
+	if cfg.ScenarioPath != "" {
+		collector.RequestsFromCalls()
+	}
 
 	// A streamed run says it has started before the scenario is loaded, so a
 	// scenario that cannot be loaded is a run.failed after a run.started.
@@ -777,6 +810,9 @@ func runScenarioWithCollector(cfg *runConfig, collector *report.Collector) (*rep
 	elapsed := time.Since(start)
 
 	result := collector.Finish(ex.Name(), elapsed)
+	if feed != nil {
+		feed.finishWith(result.Warnings)
+	}
 	applyThresholds(cfg, result)
 	applyAbort(result, aborted)
 	applyBaseline(cfg, result)
@@ -830,13 +866,13 @@ func applyBaseline(cfg *runConfig, result *report.Result) {
 // known until the script actually runs, unlike -target here.
 func enforceSafety(cfg *runConfig, in io.Reader, out io.Writer, confirm func(io.Reader, io.Writer, string) bool) error {
 	rate := cfg.Rate
-	dur := cfg.Duration
+	// For ramp, step and ramping-arrival-rate the stages carry the length,
+	// so the duration cap applies to their total, not to -duration.
+	dur := plannedDuration(cfg)
 	if cfg.Executor == "ramping-arrival-rate" {
-		// The stages carry the rates and the length of this shape: the cap
-		// applies to the highest rate it reaches and to its total duration.
-		dur = 0
+		// The stages carry the rates too: the cap applies to the highest
+		// rate the shape reaches.
 		for _, s := range cfg.Stages {
-			dur += s.Duration
 			if float64(s.Target) > rate {
 				rate = float64(s.Target)
 			}
@@ -933,7 +969,7 @@ func executeRun(cfg *runConfig, out *runOutcome) int {
 		result, err = runJSONL(cfg, os.Stdout)
 	default:
 		if cfg.OutputMode == "text" {
-			fmt.Printf("running %s (vus=%d, duration=%s)...\n", cfg.Executor, cfg.VUs, cfg.Duration)
+			fmt.Printf("running %s (%s)...\n", cfg.Executor, shapeSummary(cfg))
 		}
 		result, err = runScenario(cfg)
 	}
@@ -1037,7 +1073,7 @@ func runJSONL(cfg *runConfig, w io.Writer) (*report.Result, error) {
 
 	collector := report.NewCollector()
 	emit("run_started", map[string]any{
-		"executor": cfg.Executor, "vus": cfg.VUs, "duration_ns": cfg.Duration,
+		"executor": cfg.Executor, "vus": cfg.VUs, "duration_ns": plannedDuration(cfg),
 		"scenario_path": cfg.ScenarioPath, "target": cfg.Target.URL,
 	})
 
@@ -1115,7 +1151,7 @@ func recordAudit(command string, cfg *runConfig, result *report.Result, runErr e
 		ScenarioPath: cfg.ScenarioPath,
 		Executor:     cfg.Executor,
 		VUs:          cfg.VUs,
-		Duration:     cfg.Duration,
+		Duration:     plannedDuration(cfg),
 		Rate:         cfg.Rate,
 	}
 	if runErr != nil {
@@ -1153,15 +1189,48 @@ func printResult(w io.Writer, r *report.Result) {
 	fmt.Fprintf(w, "  total:    %d\n", r.Total)
 	fmt.Fprintf(w, "  failed:   %d\n", r.Failed)
 	fmt.Fprintf(w, "  mean:     %s\n", r.Latency.Mean)
+	if len(r.FailureReasons) > 0 {
+		fmt.Fprintf(w, "  failures: %s\n", failureReasonsText(r.FailureReasons))
+	}
+	if r.DroppedIterations > 0 {
+		fmt.Fprintf(w, "  dropped:  %d iterations (every VU was busy; not in the numbers above)\n", r.DroppedIterations)
+	}
 	if a := r.Aborted; a != nil {
 		fmt.Fprintf(w, "  ABORTED:  stopped at %s because %s was broken (observed %s)\n", a.At.Round(time.Millisecond), a.Threshold, a.Observed)
 	}
+	for _, warning := range r.Warnings {
+		fmt.Fprintf(w, "  WARNING:  %s\n", warning)
+	}
+	printIterations(w, r)
 	printChecks(w, r)
 	printSteps(w, r)
 	printDataFiles(w, r)
 	printProtocols(w, r)
 	printThresholds(w, r)
 	printBaseline(w, r)
+}
+
+// failureReasonsText lists the failure counts, e.g. "12 status 503, 3 timeout".
+func failureReasonsText(reasons []report.FailureReason) string {
+	parts := make([]string, len(reasons))
+	for i, fr := range reasons {
+		parts[i] = fmt.Sprintf("%d %s", fr.Count, fr.Reason)
+	}
+	return strings.Join(parts, ", ")
+}
+
+// printIterations writes the iterations block of a scenario run, whose
+// numbers above are its calls.
+func printIterations(w io.Writer, r *report.Result) {
+	it := r.Iterations
+	if it == nil {
+		return
+	}
+	fmt.Fprintln(w, "\niterations (the numbers above are each call the scenario made)")
+	fmt.Fprintf(w, "  %d ran, %d failed (%.2f%%)  p50 %s  p95 %s  max %s  mean %s\n",
+		it.Total, it.Failed, it.ErrorRate*100,
+		it.Duration.P50.Round(time.Microsecond), it.Duration.P95.Round(time.Microsecond),
+		it.Duration.Max.Round(time.Microsecond), it.Duration.Mean.Round(time.Microsecond))
 }
 
 // printBaseline writes the baseline block of the text summary, if the run

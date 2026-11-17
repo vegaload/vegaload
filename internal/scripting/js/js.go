@@ -44,6 +44,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -431,13 +432,16 @@ func throw(vm *goja.Runtime, err error) {
 }
 
 // requestOptions is the shape of the optional second argument to every
-// http.* method and ws.connect: `{ headers, body, insecure }`. All
-// fields are optional; a caller that passes no options object at all
-// gets the zero value.
+// http.* method and ws.connect: `{ headers, body, insecure,
+// expectedStatuses }`. All fields are optional; a caller that passes no
+// options object at all gets the zero value. expectedStatuses is read by
+// parseExpectedStatuses, not by the field mapper, so that a number that is
+// not whole is refused instead of rounded.
 type requestOptions struct {
-	Headers  map[string]string `json:"headers"`
-	Body     string            `json:"body"`
-	Insecure bool              `json:"insecure"`
+	Headers          map[string]string `json:"headers"`
+	Body             string            `json:"body"`
+	Insecure         bool              `json:"insecure"`
+	ExpectedStatuses []int             `json:"-"`
 }
 
 func parseOptions(vm *goja.Runtime, call goja.FunctionCall, argIndex int) requestOptions {
@@ -452,7 +456,44 @@ func parseOptions(vm *goja.Runtime, call goja.FunctionCall, argIndex int) reques
 	if err := vm.ExportTo(arg, &opts); err != nil {
 		throw(vm, fmt.Errorf("js: parsing options: %w", err))
 	}
+	statuses, err := parseExpectedStatuses(vm, arg.ToObject(vm).Get("expectedStatuses"))
+	if err != nil {
+		throw(vm, fmt.Errorf("js: expectedStatuses: %w", err))
+	}
+	opts.ExpectedStatuses = statuses
 	return opts
+}
+
+// parseExpectedStatuses reads the expectedStatuses option: nil when it is
+// not given, else an array of whole numbers that are HTTP statuses.
+func parseExpectedStatuses(vm *goja.Runtime, v goja.Value) ([]int, error) {
+	if v == nil || goja.IsUndefined(v) || goja.IsNull(v) {
+		return nil, nil
+	}
+	items, ok := v.Export().([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("want an array of statuses, like [200, 404]")
+	}
+	statuses := make([]int, 0, len(items))
+	for _, item := range items {
+		var n float64
+		switch x := item.(type) {
+		case int64:
+			n = float64(x)
+		case float64:
+			n = x
+		default:
+			return nil, fmt.Errorf("want an array of whole numbers, like [200, 404], not %v", vm.ToValue(item))
+		}
+		if n != math.Trunc(n) {
+			return nil, fmt.Errorf("want whole numbers, not %v", n)
+		}
+		statuses = append(statuses, int(n))
+	}
+	if err := netapi.CheckExpectedStatuses(statuses); err != nil {
+		return nil, err
+	}
+	return statuses, nil
 }
 
 // newHTTPGlobal builds the `http` object every VU's scripts see:
@@ -515,6 +556,7 @@ func (v *VU) doHTTPRequest(vm *goja.Runtime, method, url string, opts requestOpt
 	resp, err := v.http.Do(v.ctx, method, url, body, netapi.Options{
 		Headers:            opts.Headers,
 		InsecureSkipVerify: opts.Insecure,
+		ExpectedStatuses:   opts.ExpectedStatuses,
 	})
 	if err != nil {
 		throw(vm, err)

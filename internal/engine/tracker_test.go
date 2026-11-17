@@ -30,7 +30,7 @@ func (r *trackRec) Record(res IterationResult) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.records++
-	if res.VUID >= 0 { // not a dropped arrival
+	if !res.Dropped {
 		r.recorded[res.Start] = true
 	}
 }

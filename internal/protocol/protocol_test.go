@@ -6,6 +6,20 @@ import (
 	"time"
 )
 
+func TestHTTPStatusOK(t *testing.T) {
+	for code, want := range map[int]bool{
+		101: false, 199: false,
+		200: true, 201: true, 204: true, 299: true,
+		301: true, 302: true, 304: true, 399: true,
+		400: false, 401: false, 404: false, 429: false, 499: false,
+		500: false, 502: false, 503: false, 599: false,
+	} {
+		if got := HTTPStatusOK(code); got != want {
+			t.Errorf("HTTPStatusOK(%d) = %v, want %v", code, got, want)
+		}
+	}
+}
+
 func TestTargetOption(t *testing.T) {
 	tg := Target{Options: map[string]string{"read": "64", "wait": "250ms", "mode": "publish"}}
 

@@ -566,10 +566,19 @@ func (c *ProtoClient) observeCall(ctx context.Context, name string, d time.Durat
 	if !ok || !knownProtoFn(ns, fn) {
 		return
 	}
-	c.calls.RecordCall(ns, fn, d, !reply.OK, reply.BytesSent, reply.BytesReceived)
+	c.calls.RecordCall(ns, fn, d, reply.failure(), reply.BytesSent, reply.BytesReceived)
 	if reply.IsXfer && (ns == "ftp" || ns == "sftp") {
 		RecordXferMeasures(c.calls, ns, fn, reply.OK, reply.XferTiming)
 	}
+}
+
+// failure is the reply's error as a Go error, or nil when the call worked.
+// A reply carries its error as text only.
+func (r *ProtoReply) failure() error {
+	if r.OK {
+		return nil
+	}
+	return errors.New(r.Error)
 }
 
 // protoFnSet is the script call list, built once from ProtoFunctions so

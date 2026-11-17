@@ -43,7 +43,7 @@ The sample app fails about 3% of creates on purpose. The run shows a failure rat
 | `-method` | The HTTP verb. The default is GET. |
 | `-header "Key: Value"` | A request header. Repeat it for more. |
 | `-body` | The request body. |
-| `-timeout` | The limit for one iteration. The default is 30 seconds. |
+| `-timeout` | The limit for one request. The default is 30 seconds. A request that runs out of time fails with the reason `timeout`. |
 | `-insecure` | Skip the TLS certificate check. |
 | `-data` | Fill `{data.NAME.COLUMN}` in `-body` from a CSV or JSON file. See [Data files](/guides/data-files). |
 
@@ -76,6 +76,8 @@ A breach exits with code 3. See [Thresholds](/guides/thresholds).
 ## A flow of calls
 
 One URL is not a user session. For a flow, such as create, read back and list, write a scenario. The script has `http.get`, `http.post`, `http.put`, `http.patch`, `http.delete` and `http.request`. A value from one call can go into the next.
+
+Each call is one request in the report. A status of 400 or higher fails the call, the same rule as `-protocol http1`, and the script still gets the answer. To accept another status for one call, pass `expectedStatuses: [404]` in its options (`expected_statuses=[404]` in Python). See [What a scenario run counts](/guides/scenarios#what-a-scenario-run-counts).
 
 [`crud-flow.vl.js`](https://github.com/vegaload/vegaload/blob/main/examples/scenarios/crud-flow.vl.js) (and its Python twin, [`crud_flow.py`](https://github.com/vegaload/vegaload/blob/main/examples/scenarios/crud_flow.py)) creates a widget, reads it back by id, and lists all widgets. Each stage is a named `step()`, so the report shows latency and errors for each one. Run it:
 

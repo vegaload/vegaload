@@ -31,25 +31,27 @@ type callOp struct {
 	received int64
 }
 
-// RecordCall counts one finished protocol call. A nil collector counts
-// nothing. protocol and op are redacted before they are stored.
-func (c *Collector) RecordCall(protocol, op string, d time.Duration, failed bool, sent, received int64) {
+// RecordCall counts one finished protocol call that took d and failed with
+// err, or worked when err is nil. A nil collector counts nothing. protocol
+// and op are redacted before they are stored. After RequestsFromCalls, the
+// call is also one request of the run.
+func (c *Collector) RecordCall(protocol, op string, d time.Duration, err error, sent, received int64) {
 	if c == nil {
 		return
 	}
 	protocol = callName(protocol)
 	op = callName(op)
-	packed := uint64(d) << 1
-	if failed {
-		packed |= 1
-	}
+	packed := packRun(d, err != nil)
 	c.callMu.Lock()
-	defer c.callMu.Unlock()
 	p := c.protoLocked(protocol)
 	o := p.opLocked(op)
 	o.samples = append(o.samples, packed)
 	o.sent += sent
 	o.received += received
+	c.callMu.Unlock()
+	if c.callsAreRequests.Load() {
+		c.addRequest(time.Now().Add(-d), d, err)
+	}
 }
 
 // RecordMeasure counts one phase time inside a protocol. A measure is not

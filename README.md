@@ -881,6 +881,35 @@ fit your real flow. `sample-app.vegaload-plan.md` is a runbook with one
 ready-to-run `vegaload run` command per endpoint, for loading one endpoint at a
 time.
 
+### What a scenario run counts
+
+Each call a scenario makes is one request: an HTTP request, a query, a
+publish. `total`, `failed`, the error rate, the latency and the time series
+are those calls. An iteration is one run of the default function (or of
+`iteration()` in Python). Iterations are counted on their own, under
+`iterations` in the summary and the JSON: how many ran, how many failed, and
+how long a whole iteration took. A scenario that makes no calls, such as
+`smoke.vl.js`, has iterations and no requests.
+
+An HTTP call fails on a status of 400 or higher, the same rule as
+`-protocol http1`. The script still gets the answer, and the iteration goes
+on. To accept another status for one call, list the statuses it expects:
+
+```js
+const r = http.get(base + "/widgets/999", { expectedStatuses: [404] });
+```
+
+```python
+r = http.get(base + "/widgets/999", expected_statuses=[404])
+```
+
+The list replaces the default rule for that call, so `[200]` makes a 302 a
+failure too. `-timeout` is the time limit for each call.
+
+Each failed request has a reason: `timeout`, `status 503` (the status it
+got), `connection refused`, `connection reset`, `dns`, `tls` or `error`. The
+summary prints them as `failures:`, and the JSON has them as `failure_reasons`.
+
 ### Call other protocols from a scenario
 
 The full list, with options and examples, is in [Supported protocols](#supported-protocols).
@@ -1081,7 +1110,9 @@ HAR file), then turn it into a scenario:
 
 The importer makes a first draft, and you edit it. It keeps the real calls,
 in the order they were recorded, one `http` call each, with a check on the
-status the browser got. It leaves out images, fonts, style sheets and
+status the browser got. A call the browser got a status of 400 or higher for
+lists it in `expectedStatuses`, so that answer is not counted as a failed
+request. It leaves out images, fonts, style sheets and
 scripts, requests to other sites (analytics, ads, CDNs), CORS preflight
 requests, and requests that failed. "Other sites" means sites other than the
 one of the first page you opened in the recording. Use `-include-static`,
@@ -1203,9 +1234,10 @@ Keep a run's JSON summary alongside its HTML report with `-out`:
 ./vegaload diagnose baseline.json
 ```
 
-`diagnose` reports the failure rate, flags a latency long tail (p99 more
-than 5x p50), and says whether failures were concentrated in one period or
-spread out — plus suggested pass/fail thresholds (a p95 ceiling, an error
+`diagnose` reports the failure rate and the failures by reason, flags a
+latency long tail (p99 more than 5x p50), says whether failures were
+concentrated in one period or spread out, and notes dropped iterations and
+failed iterations — plus suggested pass/fail thresholds (a p95 ceiling, an error
 rate ceiling) derived from that same run, for writing into a CI gate. Add a
 bring-your-own-LLM connector for a plain-English narrative on top of the
 rule-based findings:
@@ -1366,8 +1398,9 @@ keeps at most 100 distinct step names; any more are counted together as
 #### Per-protocol results
 
 A scenario can mix HTTP, gRPC, WebSocket, SQL, MQTT, FTP and more. The report
-also shows one row per protocol, and under it one row per operation. The
-whole-run numbers stay as they are.
+also shows one row per protocol, and under it one row per operation. In a
+scenario run, the whole-run numbers are every call, so they add up to the
+protocol rows.
 
 | Protocol | Calls | Failed | Error rate | p50 | p95 | Max | Sent | Received |
 |----------|------:|-------:|-----------:|----:|----:|----:|-----:|---------:|
@@ -1393,10 +1426,12 @@ FTP and SFTP also record phase times: `connect_time`, `login_time`,
 1 ms is not counted. The times are whole milliseconds, and 0 means a reused
 connection.
 
-A script HTTP call counts as failed only on a transport error: the connection
-failed, it timed out, or the body could not be read. A 4xx or 5xx response
-counts as a success in the protocol row. Use `check()` on `r.status` to judge
-the status.
+A script HTTP call fails on a transport error (the connection failed, it timed
+out, or the body could not be read) and on a status of 400 or higher, the same
+rule as `-protocol http1`. A 2xx or 3xx answer is a success. To accept another
+status for one call, list the statuses it expects:
+`http.get(url, { expectedStatuses: [200, 404] })`, or in Python
+`http.get(url, expected_statuses=[200, 404])`.
 
 Gate on a protocol, or on one of its operations. The names are matched
 exactly (`ftp`, not `FTP`). `check_rate` cannot target a protocol. A protocol

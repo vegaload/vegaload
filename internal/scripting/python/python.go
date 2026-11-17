@@ -152,10 +152,23 @@ class HTTPResponse:
     def json(self):
         return json.loads(self.body)
 
+def _expected_statuses(statuses):
+    if statuses is None:
+        return {}
+    try:
+        statuses = list(statuses)
+    except TypeError:
+        raise VegaloadError("expected_statuses: want a list of statuses, like [200, 404]")
+    for s in statuses:
+        if isinstance(s, bool) or not isinstance(s, int):
+            raise VegaloadError("expected_statuses: want a list of whole numbers, like [200, 404], not %r" % (s,))
+    return {"expected_statuses": statuses}
+
 class HTTP:
-    def request(self, method, url, headers=None, body=None, insecure=False):
+    def request(self, method, url, headers=None, body=None, insecure=False, expected_statuses=None):
         result = _call("http", method=method, url=url,
-                        headers=headers or {}, body=body or "", insecure=bool(insecure))
+                        headers=headers or {}, body=body or "", insecure=bool(insecure),
+                        **_expected_statuses(expected_statuses))
         return HTTPResponse(result)
 
     def get(self, url, **kw):
@@ -463,10 +476,13 @@ type message struct {
 	Headers  map[string]string `json:"headers"`
 	Body     string            `json:"body"`
 	Insecure bool              `json:"insecure"`
-	Name     string            `json:"name"`
-	Handle   int               `json:"handle"`
-	Data     string            `json:"data"`
-	Text     bool              `json:"text"`
+	// ExpectedStatuses is nil when the script did not give
+	// expected_statuses, and empty when it gave an empty list.
+	ExpectedStatuses []int  `json:"expected_statuses"`
+	Name             string `json:"name"`
+	Handle           int    `json:"handle"`
+	Data             string `json:"data"`
+	Text             bool   `json:"text"`
 	// Fn and Args are a "proto" call: the function (such as "tcp.send")
 	// and its keyword arguments.
 	Fn   string         `json:"fn"`
@@ -833,6 +849,9 @@ func (v *VU) callData(msg message) (interface{}, error) {
 }
 
 func (v *VU) callHTTP(msg message) (interface{}, error) {
+	if err := netapi.CheckExpectedStatuses(msg.ExpectedStatuses); err != nil {
+		return nil, fmt.Errorf("expected_statuses: %w", err)
+	}
 	var body []byte
 	if msg.Body != "" {
 		body = []byte(msg.Body)
@@ -840,6 +859,7 @@ func (v *VU) callHTTP(msg message) (interface{}, error) {
 	resp, err := v.http.Do(v.ctx, msg.Method, msg.URL, body, netapi.Options{
 		Headers:            msg.Headers,
 		InsecureSkipVerify: msg.Insecure,
+		ExpectedStatuses:   msg.ExpectedStatuses,
 	})
 	if err != nil {
 		return nil, err

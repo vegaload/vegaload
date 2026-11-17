@@ -12,12 +12,12 @@ func TestRecordCall_CountsOrderBytesAndPercentiles(t *testing.T) {
 	// Two operations with very different times. The protocol percentile is
 	// computed from every call, not from the two operation percentiles.
 	for i := 0; i < 10; i++ {
-		c.RecordCall("postgres", "query", time.Millisecond, false, 10, 20)
+		c.RecordCall("postgres", "query", time.Millisecond, nil, 10, 20)
 	}
 	for i := 0; i < 10; i++ {
-		c.RecordCall("postgres", "exec", 100*time.Millisecond, i == 0, 1, 2)
+		c.RecordCall("postgres", "exec", 100*time.Millisecond, errIf(i == 0), 1, 2)
 	}
-	c.RecordCall("ftp", "download", 5*time.Millisecond, false, 100, 200)
+	c.RecordCall("ftp", "download", 5*time.Millisecond, nil, 100, 200)
 
 	res := c.Finish("fixed-vus", 2*time.Second)
 	if len(res.Protocols) != 2 || res.Protocols[0].Name != "postgres" || res.Protocols[1].Name != "ftp" {
@@ -51,7 +51,7 @@ func TestRecordCall_CountsOrderBytesAndPercentiles(t *testing.T) {
 func TestRecordCall_CapAndEmptyAndMeasures(t *testing.T) {
 	c := NewCollector()
 	for i := 0; i < 34; i++ {
-		c.RecordCall("p"+itoa(i), "download", time.Millisecond, false, 1, 1)
+		c.RecordCall("p"+itoa(i), "download", time.Millisecond, nil, 1, 1)
 	}
 	res := c.Finish("fixed-vus", time.Second)
 	if _, ok := res.Protocol("p0"); !ok {
@@ -70,7 +70,7 @@ func TestRecordCall_CapAndEmptyAndMeasures(t *testing.T) {
 
 	ops := NewCollector()
 	for i := 0; i < 34; i++ {
-		ops.RecordCall("ftp", "op"+itoa(i), time.Millisecond, false, 0, 0)
+		ops.RecordCall("ftp", "op"+itoa(i), time.Millisecond, nil, 0, 0)
 	}
 	got := ops.Finish("fixed-vus", time.Second)
 	ftp := got.Protocols[0]
@@ -94,7 +94,7 @@ func TestRecordCall_CapAndEmptyAndMeasures(t *testing.T) {
 	}
 
 	m := NewCollector()
-	m.RecordCall("ftp", "list", time.Millisecond, false, 0, 0)
+	m.RecordCall("ftp", "list", time.Millisecond, nil, 0, 0)
 	m.RecordMeasure("ftp", "upload_time", 0)
 	m.RecordMeasure("ftp", "connect_time", 3*time.Millisecond)
 	out := m.Finish("fixed-vus", time.Second)
@@ -115,7 +115,7 @@ func TestRecordCall_Concurrent(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for n := 0; n < 100; n++ {
-				c.RecordCall("redis", "command", time.Millisecond, n%10 == 0, 3, 4)
+				c.RecordCall("redis", "command", time.Millisecond, errIf(n%10 == 0), 3, 4)
 			}
 		}()
 	}

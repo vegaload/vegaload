@@ -16,7 +16,9 @@ vegaload validate -secret-env VL_COOKIE checkout.vl.js
 
 The importer makes a first draft, and you edit it. It keeps the real calls,
 in the order they were recorded, one `http` call each, with a check on the
-status the browser got. It leaves out images, fonts, style sheets and
+status the browser got. A call the browser got a status of 400 or higher for
+lists it in `expectedStatuses`, so that answer is not counted as a failed
+request. It leaves out images, fonts, style sheets and
 scripts, requests to other sites (analytics, ads, CDNs), CORS preflight
 requests, and requests that failed. "Other sites" means sites other than the
 one of the first page you opened in the recording. Use `-include-static`,

@@ -19,10 +19,14 @@ Some sections appear only when they apply. This page was checked against real 0.
 | `executor` | The load shape, such as `fixed-vus`. |
 | `started_at` | When the run started, as a UTC timestamp. |
 | `elapsed_ns` | How long the run took. |
-| `total` | Number of iterations or calls counted. |
+| `total` | Number of requests. In a `-protocol` run a request is one iteration. In a scenario run it is one call the scenario made. |
 | `failed` | How many of them failed. |
 | `error_rate` | `failed` divided by `total`. |
-| `latency` | The latency summary. See below. |
+| `latency` | The latency summary of the requests. See below. |
+| `failure_reasons` | How many requests failed for each reason, most first. Present when a request failed. See below. |
+| `iterations` | A scenario run's iterations. Present only for a scenario run. See below. |
+| `dropped_iterations` | Arrivals that `constant-arrival-rate` or `ramping-arrival-rate` could not start because every VU was busy. They never ran, so they are in no other number. Present when there were any. |
+| `warnings` | Plain sentences about what makes the numbers less trustworthy, such as more than 1% of the planned iterations dropped. Present when there is one. |
 | `time_series` | The run, cut into slices over time. |
 | `thresholds` | Each threshold and its result. Present when you set thresholds. |
 | `thresholds_passed` | `true` if every threshold passed. |
@@ -39,6 +43,24 @@ The same fields appear in `steps` and `protocols`.
 | --- | --- |
 | `min_ns`, `mean_ns`, `max_ns` | Fastest, average and slowest call. |
 | `p50_ns`, `p90_ns`, `p95_ns`, `p99_ns` | Percentiles. `p95_ns` means 95% of calls were this fast or faster. |
+
+## `failure_reasons[]`
+
+| Field | Meaning |
+| --- | --- |
+| `reason` | `timeout`, `status N` (the status the answer had, such as `status 503`), `connection refused`, `connection reset`, `dns`, `tls` or `error`. |
+| `count` | How many requests failed for that reason. The counts add up to `failed`. |
+
+## `iterations`
+
+An iteration is one run of the scenario's default function (or `iteration()` in Python), every call in it included.
+
+| Field | Meaning |
+| --- | --- |
+| `total` | How many iterations ran. |
+| `failed` | How many ended in an error the scenario threw. A failed status is not one: it fails the call, not the iteration. |
+| `error_rate` | `failed` divided by `total`. |
+| `duration` | How long a whole iteration took, with the same fields as `latency`. |
 
 ## `time_series[]`
 
