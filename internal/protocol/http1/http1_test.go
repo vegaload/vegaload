@@ -161,3 +161,20 @@ func TestDriver_StaysOnHTTP1(t *testing.T) {
 		t.Errorf("Name() = %q, want %q", d.Name(), "http1")
 	}
 }
+
+func TestDriver_Do_MeasuresTTFB(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(20 * time.Millisecond)
+		w.Write([]byte("hello"))
+	}))
+	defer srv.Close()
+
+	d := mustNew(t, protocol.Target{URL: srv.URL}, time.Second)
+	res, err := d.Do(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.TTFB < 20*time.Millisecond || res.TTFB > time.Second {
+		t.Fatalf("TTFB = %v, want about 20ms", res.TTFB)
+	}
+}

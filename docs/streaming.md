@@ -78,6 +78,26 @@ One per second of the run, in order, covering the calls that started in that sec
 | `total` | integer | Calls since the start, up to and including this bucket. |
 | `totalFailed` | integer | Failed calls since the start. |
 
+The fields below were added later. A reader that does not know them skips them, and the fields above are unchanged. Every `*Total` field adds up this point and every earlier one, as sent, like `total`.
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `minMs`, `avgMs`, `maxMs`, `p90Ms` | number | The other latency figures of the bucket's calls, in ms; `0` when `requests` is 0. `minMs` and `maxMs` are exact. |
+| `activeVUs` | integer | The most VUs that ran at once in this second. In an arrival-rate run a VU is one running iteration. |
+| `maxVUs` | integer | The most VUs the run can use: `-vus`, the highest stage target, or `-max-vus`, or the most seen so far when that is higher. |
+| `iterationsStarted`, `iterationsCompleted`, `iterationsDropped` | integer | The iterations that started in this second, those of them that ran to their end (failed or not), and the arrivals due in this second that were dropped because every VU was busy. An iteration cut off by the end of the run started but did not complete. |
+| `iterationsStartedTotal`, `iterationsCompletedTotal`, `iterationsDroppedTotal` | integer | The running totals of the three above. |
+| `bytesSent`, `bytesReceived` | integer | Bytes of the calls that started in this second. |
+| `bytesSentTotal`, `bytesReceivedTotal` | integer | The running totals. |
+| `checksPassed`, `checksFailed` | integer | `check()` results made in this second. |
+| `checksPassedTotal`, `checksFailedTotal` | integer | The running totals. |
+| `ttfbP50Ms`, `ttfbP95Ms` | number | Time to first byte of the HTTP answers of the calls that started in this second, in ms, from the start of the call (connecting included). Omitted when there was none. |
+| `steps` | array | Each step that ran in this second, by name: `{name, count, failed, p95Ms}`. Omitted when there was none. |
+| `rows` | array | The protocol rows with calls in this second, most calls first, at most 50: `{protocol, name, method, endpoint, count, failed, p50Ms, p95Ms, p99Ms}`. An HTTP row is an endpoint, `name` `GET /users/{id}` with `method` `GET` and `endpoint` `/users/{id}`; other rows have no `method` or `endpoint`. A row past the 50 is not in the point; the final result has every row. Omitted when there was no call. |
+| `errors` | object | The failed calls of this second by kind, kind to count: `status 503` (one kind per status), `timeout`, `connection refused`, `dns`, `tls` or `other`, and the failed checks under `check failed`. A failed check is not a failed call, so the counts can add up to more than `failed`. Omitted when nothing failed. |
+
+Step and check names, and row names, are the same text the report holds, with every `-secret-env` value redacted. A point carries no error message; the final result has one sample per kind.
+
 A call is recorded when it ends but belongs to the second it started in, so a point is sent only when it is complete. VegaLoad sends the point of second N when all of these hold:
 
 - the second has closed and 500 ms have passed (a call just starting or just ending is counted in it), and
@@ -98,7 +118,7 @@ The bucket width is the same one-second width as the final `time_series` in the 
 
 ### `run.finished`
 
-`data` is the run's structured result, exactly what `-out` writes (the `report.Result` JSON: `schema`, `executor`, `started_at`, `elapsed_ns`, `total`, `failed`, `error_rate`, `latency`, `time_series`, and when present `warnings`, `generator`, `thresholds`, `thresholds_passed`, `aborted`, `baseline`, `steps`, `protocols`, `checks`, `data_files`), plus the fields below. Every latency block in it carries a `histogram` (see `website/docs/reference/report-json.md`). `schema` and `histogram` were added later; a reader that does not know them ignores them. The HTTP endpoint rows, such as `GET /users/{id}`, are the `operations` of the `http`, `http1` and `http2` entries of `protocols`, each with `method` and `endpoint` (added later too). Live points do not carry them.
+`data` is the run's structured result, exactly what `-out` writes (the `report.Result` JSON: `schema`, `executor`, `started_at`, `elapsed_ns`, `total`, `failed`, `error_rate`, `latency`, `time_series`, and when present `warnings`, `generator`, `thresholds`, `thresholds_passed`, `aborted`, `baseline`, `steps`, `protocols`, `checks`, `data_files`), plus the fields below. Every latency block in it carries a `histogram` (see `website/docs/reference/report-json.md`). `schema` and `histogram` were added later; a reader that does not know them ignores them. The HTTP endpoint rows, such as `GET /users/{id}`, are the `operations` of the `http`, `http1` and `http2` entries of `protocols`, each with `method` and `endpoint` (added later too). A live point carries the busiest of them for its second (`rows`). Also added later: `errors` (failures by kind, each with a `sample` message, at the top level and on each operation), `bytes_sent`, `bytes_received`, `ttfb`, `vus_peak`, `vus_max`, `iterations_started` and `iterations_completed`.
 
 | Field | Type | Notes |
 | --- | --- | --- |
@@ -149,4 +169,4 @@ Push batches follow the same rules as litmus-lite's: `POST` with `Content-Type: 
 
 ## Not in v1 of this contract
 
-`-stream-pull` (a server the consumer reads from), `stream validate|replay|receive`, `serve`, `doctor -stream`, live threshold status events, per-step live points, and joining with a litmus-lite run (the combined demo). See `docs/PENDING.md` (kept locally, not in git).
+`-stream-pull` (a server the consumer reads from; `-stats-addr` serves cumulative numbers at `/stats` instead, see the stats endpoint guide), `stream validate|replay|receive`, `serve`, `doctor -stream`, live threshold status events, and joining with a litmus-lite run (the combined demo). See `docs/PENDING.md` (kept locally, not in git).

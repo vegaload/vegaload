@@ -26,6 +26,12 @@ Some sections appear only when they apply. This page was checked against real 0.
 | `error_rate` | `failed` divided by `total`. |
 | `latency` | The latency summary of the requests. See below. |
 | `failure_reasons` | How many requests failed for each reason, most first. Present when a request failed. See below. |
+| `errors` | The failures by kind, with one sample message each, most first. Present when a request or a check failed. See below. |
+| `ttfb` | Time to first byte of the HTTP calls: from sending the request to the first byte of the answer. The same fields as `latency`. Present when the run made HTTP calls. |
+| `bytes_sent`, `bytes_received` | The bytes every protocol sent and received, added up. Present when there were any. |
+| `vus_peak` | The most VUs that were running at the same time. |
+| `vus_max` | The most VUs the load shape allowed, or `vus_peak` if that was higher. In a merged report both are added up, since each run was its own machine. |
+| `iterations_started`, `iterations_completed` | Iterations that started, and those that ended. A run that stops mid-iteration has fewer completed than started. Dropped iterations are in neither. |
 | `iterations` | A scenario run's iterations. Present only for a scenario run. See below. |
 | `dropped_iterations` | Arrivals that `constant-arrival-rate` or `ramping-arrival-rate` could not start because every VU was busy. They never ran, so they are in no other number. Present when there were any. |
 | `warnings` | Plain sentences about what makes the numbers less trustworthy, such as more than 1% of the planned iterations dropped, or a warning that starts with `generator overloaded:`. Present when there is one. |
@@ -84,6 +90,16 @@ In a merged report each generator was its own machine, so `generator` holds the 
 | --- | --- |
 | `reason` | `timeout`, `status N` (the status the answer had, such as `status 503`), `connection refused`, `connection reset`, `dns`, `tls` or `error`. |
 | `count` | How many requests failed for that reason. The counts add up to `failed`. |
+
+## `errors[]`
+
+| Field | Meaning |
+| --- | --- |
+| `kind` | `status N`, `timeout`, `connection refused`, `dns`, `tls`, `check failed` (a check that did not pass, which is not a failed request) or `other`. |
+| `count` | How many failures of this kind. Without `check failed`, the counts add up to `failed`. |
+| `sample` | The message of the first failure of this kind, on one line and at most 200 bytes. A password in a URL is masked and every `-secret-env` value is removed. For `check failed` it is the check's name. |
+
+Each entry in a protocol's `operations` has its own `errors` too, without `check failed`.
 
 ## `iterations`
 
@@ -148,8 +164,8 @@ An iteration is one run of the scenario's default function (or `iteration()` in 
 | `latency` | The latency summary. |
 | `bytes_sent`, `bytes_received` | Bytes moved. |
 | `bytes_per_second` | Throughput. |
-| `operations[]` | One entry per kind of call, such as ftp `roundtrip`. Each has `name`, `total`, `failed`, `error_rate`, `latency`, `bytes_sent` and `bytes_received`. For `http`, `http1` and `http2`, each entry is one endpoint row: `name` is `METHOD name`, such as `GET /users/{id}`, and `method` and `endpoint` hold its two parts. There are at most 500 such rows. The calls past them are in one row named `Other`, which has no `method` or `endpoint`. |
-| `measures[]` | Phase times inside the protocol, such as ftp `connect_time`. Each has `name`, `count` and `latency`. Present when the protocol records them. |
+| `operations[]` | One entry per kind of call, such as ftp `roundtrip`. Each has `name`, `total`, `failed`, `error_rate`, `latency`, `bytes_sent`, `bytes_received`, and `errors` when a call failed. For `http`, `http1` and `http2`, each entry is one endpoint row: `name` is `METHOD name`, such as `GET /users/{id}`, and `method` and `endpoint` hold its two parts. There are at most 500 such rows. The calls past them are in one row named `Other`, which has no `method` or `endpoint`. |
+| `measures[]` | Phase times inside the protocol, such as ftp `connect_time`. Each has `name`, `count` and `latency`. Present when the protocol records them. For `http`, `http1` and `http2` this includes `ttfb`, the time to first byte. |
 
 ## `checks[]`
 

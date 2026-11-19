@@ -41,6 +41,35 @@ type Result struct {
 	// is omitted when no request failed.
 	FailureReasons []FailureReason `json:"failure_reasons,omitempty"`
 
+	// Errors is the failed requests grouped by kind (see failure.Kind),
+	// each with one sample message, most first. Failed checks are the kind
+	// "check failed": they are not failed requests, so the counts can add up
+	// to more than Failed. It is omitted when nothing failed.
+	Errors []ErrorKind `json:"errors,omitempty"`
+
+	// BytesSent and BytesReceived are the bytes of every protocol call,
+	// the sum of Protocols. They are omitted when no call counted bytes.
+	BytesSent     int64 `json:"bytes_sent,omitempty"`
+	BytesReceived int64 `json:"bytes_received,omitempty"`
+
+	// TTFB is the time to the first byte of each HTTP answer, measured
+	// from the start of the call, connecting included. It is omitted when
+	// the run made no HTTP call.
+	TTFB *Latency `json:"ttfb,omitempty"`
+
+	// VUsPeak is the most VUs that ran at once. In an arrival-rate run a VU
+	// is one running iteration. VUsMax is the most the run could use: the
+	// planned maximum, or VUsPeak when that is higher. Both are omitted
+	// when no VU was counted.
+	VUsPeak int64 `json:"vus_peak,omitempty"`
+	VUsMax  int64 `json:"vus_max,omitempty"`
+
+	// IterationsStarted counts the iterations that started, and
+	// IterationsCompleted those that ran to their end, failed or not. An
+	// iteration cut off by the end of the run started but did not complete.
+	IterationsStarted   int64 `json:"iterations_started,omitempty"`
+	IterationsCompleted int64 `json:"iterations_completed,omitempty"`
+
 	// Iterations is how many times a scenario ran its iteration function,
 	// and how long a whole iteration took. It is set only for a scenario
 	// run; in a -protocol run an iteration is one request.
@@ -155,6 +184,15 @@ type FailureReason struct {
 	Count  int64  `json:"count"`
 }
 
+// ErrorKind is how many failures there were of one kind, such as
+// "timeout" or "status 503", and one of their messages. Sample is masked,
+// redacted and short (see failure.Sample).
+type ErrorKind struct {
+	Kind   string `json:"kind"`
+	Count  int64  `json:"count"`
+	Sample string `json:"sample,omitempty"`
+}
+
 // IterationStats is a scenario run's iterations: how many ran, how many
 // ended in an error, and how long a whole iteration took, every call in it
 // included.
@@ -206,6 +244,9 @@ type OperationResult struct {
 	Latency       Latency `json:"latency"`
 	BytesSent     int64   `json:"bytes_sent"`
 	BytesReceived int64   `json:"bytes_received"`
+	// Errors is this row's failed calls by kind, most first. It is omitted
+	// when none failed.
+	Errors []ErrorKind `json:"errors,omitempty"`
 }
 
 // MeasureResult is a phase time inside a protocol, such as ftp upload_time.

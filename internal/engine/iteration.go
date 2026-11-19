@@ -68,6 +68,30 @@ type IterationTracker interface {
 	End(start time.Time)
 }
 
+// VUTracker is an optional extra for a Recorder that wants to know how many
+// VUs are running at once. An executor checks for it once and, when the
+// Recorder has it, calls VUStarted when a VU starts and VUStopped when it has
+// stopped, always paired, from any goroutine. In FixedVUs, Ramp and Step a VU
+// is one looping goroutine; in the arrival-rate executors each running
+// iteration is one VU, so the count there is the iterations in flight.
+type VUTracker interface {
+	VUStarted()
+	VUStopped()
+}
+
+// vuTracking returns rec's VUTracker, or one that does nothing.
+func vuTracking(rec Recorder) VUTracker {
+	if vt, ok := rec.(VUTracker); ok {
+		return vt
+	}
+	return noVUs{}
+}
+
+type noVUs struct{}
+
+func (noVUs) VUStarted() {}
+func (noVUs) VUStopped() {}
+
 // Summary is a minimal Recorder that keeps running counts: total
 // iterations, failed iterations, dropped arrivals, and mean duration. It
 // exists so the engine and its tests have something to record into in

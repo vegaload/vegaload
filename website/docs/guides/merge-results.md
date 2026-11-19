@@ -22,7 +22,9 @@ vegaload merge -out merged.json -report merged.html gen-1.json gen-2.json gen-3.
 
 The merged report is the same as one run of all the load would give. Percentiles from several machines cannot be averaged. So each report carries a latency histogram, and `merge` adds the histograms up and works every percentile out again from the sum. It also adds:
 
-- the totals, failed requests, failure reasons and dropped iterations,
+- the totals, failed requests, failure reasons, errors by kind and dropped iterations,
+- the iterations started and completed, and the peak and most VUs, since each machine ran its own VUs,
+- the time to first byte, from its histograms like the latency,
 - the iterations, steps, checks, protocols, operations and measures, matched by name,
 - the bytes sent and received. Bytes per second is worked out from the merged run's length.
 

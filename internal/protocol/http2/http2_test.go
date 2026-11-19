@@ -94,6 +94,9 @@ func TestDriver_Do_H2CPlaintext(t *testing.T) {
 	if gotProto != "HTTP/2.0" {
 		t.Errorf("server saw proto %q, want HTTP/2.0 over plaintext (h2c)", gotProto)
 	}
+	if res.TTFB <= 0 || res.TTFB > time.Second {
+		t.Errorf("TTFB = %v, want a measured time", res.TTFB)
+	}
 }
 
 func TestDriver_Do_FailureOnServerError(t *testing.T) {

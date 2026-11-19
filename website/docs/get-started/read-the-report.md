@@ -35,7 +35,16 @@ thresholds
 
 Some lines appear only when they apply:
 
+- `vus:` shows the most VUs that ran at once and the most the load shape allowed, such as `peak 5 of 5`. `iters:` shows how many iterations started and how many completed.
+- `bytes:` shows the bytes sent and received, when the calls moved any. `ttfb:` shows the time to first byte of the HTTP calls, from sending the request to the first byte of the answer.
 - `failures:` counts the failed calls by reason, such as `12 status 503, 3 timeout`.
+- `errors by kind` lists the failures by kind, with the message of the first one of each kind. Checks that did not pass are a kind of their own, `check failed`, with the check's name as the sample:
+
+  ```
+  errors by kind (one sample each)
+         550  status 404          status 404
+          13  check failed        status is 201
+  ```
 - `dropped:` counts the iterations `constant-arrival-rate` or `ramping-arrival-rate` could not start because every VU was busy. They never ran, so they are not in `total`, `failed` or the latency. When more than 1% of the planned iterations were dropped, a `WARNING:` line says so: the target got less load than you asked for. Raise `-max-vus`.
 - `WARNING:  generator overloaded:` means the machine running VegaLoad could not keep up. It says why: VegaLoad's CPU stayed at 90% or more of the machine's CPUs for 3 seconds or more, its goroutines waited 20 ms or more to run for 3 seconds or more, or more than 1% of the planned iterations were dropped. A busy generator starts calls late and adds its own delay to the latency. Run fewer VUs on one machine, or spread the load over more machines. The CPU is VegaLoad's own process; the `python3` processes of a Python scenario are not counted.
 - A scenario run adds an `iterations` block. In a scenario, each call is one request, and an iteration (one run of the whole scenario function) is counted on its own, with its own failures and duration.
@@ -63,7 +72,7 @@ A run with no threshold exits 0 even if every call failed. Always set a limit wh
 
 ## The HTML report
 
-The top shows the total, the failed count and the error rate, and the dropped iterations when there were any. The warnings follow, such as dropped iterations or an overloaded generator, then a **Failures** table of the failed calls by reason. The other sections follow in this order.
+The top shows the total, the failed count and the error rate, and the dropped iterations when there were any. It also shows the peak and most VUs, the iterations started and completed, the bytes sent and received, and the time to first byte, when they apply. The warnings follow, such as dropped iterations or an overloaded generator, then a **Failures** table of the failed calls by reason, and an **Errors by kind** table with one sample message for each kind. The other sections follow in this order.
 
 **Thresholds.** One row per limit, with PASS or FAIL, the limit and the observed value. The badge on top says "All thresholds passed" or "Thresholds breached".
 
@@ -93,6 +102,10 @@ The top shows the total, the failed count and the error rate, and the dropped it
 | `total`, `failed`, `error_rate` | The call counts. `error_rate` is a fraction, so 0.029 is 2.9% |
 | `latency` | `min_ns`, `mean_ns`, `max_ns`, `p50_ns`, `p90_ns`, `p95_ns`, `p99_ns`, and the `histogram` they come from |
 | `failure_reasons` | The failed calls by reason: `reason` and `count` |
+| `errors` | The failures by kind: `kind`, `count` and one `sample` message |
+| `ttfb`, `bytes_sent`, `bytes_received` | Time to first byte of the HTTP calls, and the bytes moved |
+| `vus_peak`, `vus_max` | The most VUs that ran at once, and the most the load shape allowed |
+| `iterations_started`, `iterations_completed` | Iterations that started, and those that ended |
 | `iterations` | A scenario run's iterations: `total`, `failed`, `error_rate`, `duration` |
 | `dropped_iterations` | Arrivals that could not start because every VU was busy |
 | `warnings` | Plain sentences, such as too many dropped iterations or an overloaded generator |

@@ -3,9 +3,14 @@ error_rate
 executor
 failed
 generator
+iterations_completed
+iterations_started
 latency
 protocols
 schema
 started_at
 time_series
 total
+ttfb
+vus_max
+vus_peak

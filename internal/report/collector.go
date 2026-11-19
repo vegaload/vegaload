@@ -16,7 +16,6 @@ import (
 
 	"github.com/vegaload/vegaload/internal/engine"
 	"github.com/vegaload/vegaload/internal/failure"
-	"github.com/vegaload/vegaload/internal/hist"
 	"github.com/vegaload/vegaload/internal/secrets"
 )
 
@@ -46,14 +45,16 @@ type Collector struct {
 	// started in, which lets a live view know which buckets are left at
 	// the end (see LiveBuckets).
 	secs []bucketAccum
-	// reasons counts the failed requests by failure.Reason.
+	// reasons counts the failed requests by failure.Reason, and errs by
+	// failure.Kind, with a sample message.
 	reasons map[string]int64
-	// liveHists is the latency of each second a live cursor has not handed
-	// out yet. It is kept only while a cursor exists (tracking), from the
-	// cursor's next second (liveNext) on, and a second's histogram is
+	errs    errorKinds
+	// live is what a live cursor needs of each second it has not handed out
+	// yet (see liveSec). It is kept only while a cursor exists (tracking),
+	// from the cursor's next second (liveNext) on, and a second's state is
 	// dropped when the cursor hands the second out.
-	liveHists map[int64]*hist.Histogram
-	liveNext  int64
+	live     map[int64]*liveSec
+	liveNext int64
 
 	// callsAreRequests is set by RequestsFromCalls. Each recorded call is
 	// then a request, and each iteration goes to iterations instead.
@@ -65,6 +66,15 @@ type Collector struct {
 	// arrivals that found every VU busy. Their sum is the planned load.
 	ran     atomic.Int64
 	dropped atomic.Int64
+	// started counts the iterations that began (Begin). Those cut off by the
+	// end of the run are in started but not in ran.
+	started atomic.Int64
+
+	// vuActive is the VUs running now (engine.VUTracker), vuPeak the most at
+	// once, and vuPlanned the most the run's shape can use (SetPlannedVUs).
+	vuActive  atomic.Int64
+	vuPeak    atomic.Int64
+	vuPlanned atomic.Int64
 
 	// tracking is set once a live cursor exists. Only then are the starts of
 	// running iterations kept (inflight, guarded by mu, counts them by the
@@ -87,6 +97,9 @@ type Collector struct {
 	checkMu    sync.Mutex
 	checkOrder []string
 	checks     map[string]*CheckResult
+	// failedCheck is the name of the first check that failed: the sample of
+	// the "check failed" kind.
+	failedCheck string
 
 	// steps holds each named step's runs (FR-CLI-18), guarded by stepMu
 	// for the same reason as checks.
@@ -95,10 +108,12 @@ type Collector struct {
 	steps     map[string]*runStats
 
 	// calls holds every recorded protocol call, guarded by callMu. Byte
-	// counts are summed. Measures are phase times and are not calls.
+	// counts are summed. Measures are phase times and are not calls. ttfb is
+	// every TTFBMeasure, of any protocol.
 	callMu    sync.Mutex
 	callOrder []string
 	calls     map[string]*callProto
+	ttfb      *dist
 }
 
 // runStats is the runs of one thing (an iteration, a step) and how many
@@ -126,6 +141,7 @@ func NewCollectorWith(o Options) *Collector {
 		start:      time.Now(),
 		reqs:       newDist(o.Exact),
 		iterations: &runStats{d: newDist(o.Exact)},
+		ttfb:       newDist(o.Exact),
 	}
 }
 
@@ -153,7 +169,9 @@ func (c *Collector) RequestsFromCalls() { c.callsAreRequests.Store(true) }
 // Begin and End implement engine.IterationTracker. They keep the start of each
 // running iteration, only while a live cursor exists (see LiveBuckets), so the
 // cursor can hold a bucket back until the calls that started in it have ended.
+// Begin also counts the iterations that started, cursor or not.
 func (c *Collector) Begin(start time.Time) {
+	c.started.Add(1)
 	if !c.tracking.Load() {
 		return
 	}
@@ -163,7 +181,58 @@ func (c *Collector) Begin(start time.Time) {
 		c.inflight = map[int64]int{}
 	}
 	c.inflight[idx]++
+	if s := c.liveSecLocked(idx); s != nil {
+		s.started++
+	}
 	c.mu.Unlock()
+}
+
+// VUStarted and VUStopped implement engine.VUTracker: they keep the number of
+// VUs running now and the most that ran at once.
+func (c *Collector) VUStarted() { c.vuChange(1) }
+
+// VUStopped undoes one VUStarted.
+func (c *Collector) VUStopped() { c.vuChange(-1) }
+
+func (c *Collector) vuChange(delta int64) {
+	var n int64
+	if c.tracking.Load() {
+		// Under mu, so the count a second ends with is the last one set.
+		c.mu.Lock()
+		n = c.vuActive.Add(delta)
+		if s := c.liveSecLocked(c.secOf(time.Now())); s != nil {
+			s.vuPeak = max(s.vuPeak, n)
+			s.vuEnd, s.vuSet = n, true
+		}
+		c.mu.Unlock()
+	} else {
+		n = c.vuActive.Add(delta)
+	}
+	for {
+		peak := c.vuPeak.Load()
+		if n <= peak || c.vuPeak.CompareAndSwap(peak, n) {
+			return
+		}
+	}
+}
+
+// SetPlannedVUs sets the most VUs the run's shape can use: -vus, the highest
+// stage target, or -max-vus. It is what MaxVUs reports until more ran.
+func (c *Collector) SetPlannedVUs(n int) { c.vuPlanned.Store(int64(n)) }
+
+// ActiveVUs is the number of VUs running now.
+func (c *Collector) ActiveVUs() int64 { return c.vuActive.Load() }
+
+// PeakVUs is the most VUs that ran at once so far.
+func (c *Collector) PeakVUs() int64 { return c.vuPeak.Load() }
+
+// MaxVUs is the planned maximum (SetPlannedVUs), or PeakVUs when higher.
+func (c *Collector) MaxVUs() int64 { return max(c.vuPlanned.Load(), c.vuPeak.Load()) }
+
+// IterationCounts is how many iterations started, completed (failed or not)
+// and were dropped so far. Safe to call while the run goes on.
+func (c *Collector) IterationCounts() (started, completed, dropped int64) {
+	return c.started.Load(), c.ran.Load(), c.dropped.Load()
 }
 
 // End undoes the Begin made with the same start. The engine calls it after the
@@ -208,6 +277,7 @@ func (c *Collector) liveState(idx int64) (running bool, last int64) {
 func (c *Collector) Record(r engine.IterationResult) {
 	if r.Dropped {
 		c.dropped.Add(1)
+		c.withLive(r.Start, func(s *liveSec) { s.dropped++ })
 		return
 	}
 	c.ran.Add(1)
@@ -215,22 +285,61 @@ func (c *Collector) Record(r engine.IterationResult) {
 		c.iterMu.Lock()
 		c.iterations.add(r.Duration, r.Err != nil)
 		c.iterMu.Unlock()
+		c.withLive(r.Start, func(s *liveSec) { s.completed++ })
 		return
 	}
-	c.addRequest(r.Start, r.Duration, r.Err)
+	c.addRequest(request{start: r.Start, d: r.Duration, err: r.Err, iteration: true})
 }
 
-// addRequest records one request that started at start, took d, and failed
-// with err (nil when it worked).
-func (c *Collector) addRequest(start time.Time, d time.Duration, err error) {
-	idx := int64(max(start.Sub(c.start), 0) / bucketWidth)
-	failed := err != nil
-	var reason string
-	if failed {
-		reason = failure.Reason(err)
+// request is one request of the run: it started at start, took d, and
+// failed with err (nil when it worked), for reason when the caller already
+// knows it.
+type request struct {
+	start     time.Time
+	d         time.Duration
+	err       error
+	reason    string
+	iteration bool      // the request is also one completed iteration
+	call      *liveCall // the request is a protocol call
+}
+
+// liveCall is what a live point needs of one protocol call.
+type liveCall struct {
+	protocol, op   string
+	sent, received int64
+}
+
+func (s *liveSec) addCall(lc *liveCall, d time.Duration, failed bool) {
+	s.sent += lc.sent
+	s.received += lc.received
+	if s.rows == nil {
+		s.rows = map[rowKey]*liveRuns{}
+	}
+	k := rowKey{lc.protocol, lc.op}
+	r := s.rows[k]
+	if r == nil {
+		r = &liveRuns{}
+		s.rows[k] = r
+	}
+	r.add(d, failed)
+}
+
+func (s *liveSec) addError(kind string) {
+	if s.errors == nil {
+		s.errors = map[string]int64{}
+	}
+	s.errors[kind]++
+}
+
+// addRequest records one request.
+func (c *Collector) addRequest(r request) {
+	idx := c.secOf(r.start)
+	failed := r.err != nil
+	if failed && r.reason == "" {
+		r.reason = failure.Reason(r.err)
 	}
 	c.mu.Lock()
-	c.reqs.add(d)
+	c.reqs.add(r.d)
 	if n := int64(len(c.secs)); idx >= n {
 		c.secs = append(c.secs, make([]bucketAccum, idx+1-n)...)
 	}
@@ -241,18 +350,20 @@ func (c *Collector) addRequest(start time.Time, d time.Duration, err error) {
 		if c.reasons == nil {
 			c.reasons = map[string]int64{}
 		}
-		c.reasons[reason]++
+		c.reasons[r.reason]++
+		c.errs.addErr(r.reason, r.err)
 	}
-	if idx >= c.liveNext && c.tracking.Load() {
-		h := c.liveHists[idx]
-		if h == nil {
-			if c.liveHists == nil {
-				c.liveHists = map[int64]*hist.Histogram{}
-			}
-			h = hist.New()
-			c.liveHists[idx] = h
+	if s := c.liveSecLocked(idx); s != nil {
+		s.lat.Add(r.d)
+		if failed {
+			s.addError(failure.KindOf(r.reason))
 		}
-		h.Add(d)
+		if r.iteration {
+			s.completed++
+		}
+		if r.call != nil {
+			s.addCall(r.call, r.d, failed)
+		}
 	}
 	c.mu.Unlock()
 
@@ -275,6 +386,18 @@ func (c *Collector) RecordCheck(name string, passed bool) {
 	// A check name is text the script chose, so it may carry a secret the
 	// script read (FR-CLI-17).
 	name = secrets.Redact(name)
+	c.countCheck(name, passed)
+	c.withLive(time.Now(), func(s *liveSec) {
+		if passed {
+			s.checksPassed++
+			return
+		}
+		s.checksFailed++
+		s.addError(failure.CheckFailed)
+	})
+}
+
+func (c *Collector) countCheck(name string, passed bool) {
 	c.checkMu.Lock()
 	defer c.checkMu.Unlock()
 	if c.checks == nil {
@@ -295,8 +418,11 @@ func (c *Collector) RecordCheck(name string, passed bool) {
 	}
 	if passed {
 		cr.Passes++
-	} else {
-		cr.Fails++
+		return
+	}
+	cr.Fails++
+	if c.failedCheck == "" {
+		c.failedCheck = name
 	}
 }
 
@@ -313,6 +439,23 @@ func (c *Collector) RecordStep(name string, d time.Duration, failed bool) {
 	// A step name is text the script chose, so it may carry a secret the
 	// script read (FR-CLI-17).
 	name = secrets.Redact(name)
+	name = c.countStep(name, d, failed)
+	c.withLive(time.Now().Add(-d), func(s *liveSec) {
+		if s.steps == nil {
+			s.steps = map[string]*liveRuns{}
+		}
+		r := s.steps[name]
+		if r == nil {
+			r = &liveRuns{}
+			s.steps[name] = r
+		}
+		r.add(d, failed)
+	})
+}
+
+// countStep counts one run of a step and returns the name it was counted
+// under.
+func (c *Collector) countStep(name string, d time.Duration, failed bool) string {
 	c.stepMu.Lock()
 	defer c.stepMu.Unlock()
 	if c.steps == nil {
@@ -331,6 +474,7 @@ func (c *Collector) RecordStep(name string, d time.Duration, failed bool) {
 		c.stepOrder = append(c.stepOrder, name)
 	}
 	st.add(d, failed)
+	return name
 }
 
 // snapshotSteps computes each step's totals and latency, in first-seen
@@ -400,21 +544,40 @@ func (c *Collector) Finish(executor string, elapsed time.Duration) *Result {
 	reqs := c.reqs.snapshot()
 	secs := append([]bucketAccum(nil), c.secs...)
 	reasons := sortedReasons(c.reasons)
+	errs := c.errs.copy()
 	c.mu.Unlock()
 
 	res := &Result{
-		Schema:            Schema,
-		Executor:          executor,
-		StartedAt:         c.start,
-		Elapsed:           elapsed,
-		Total:             reqs.h.Count(),
-		DroppedIterations: c.dropped.Load(),
-		FailureReasons:    reasons,
-		Iterations:        c.snapshotIterations(),
-		Checks:            c.snapshotChecks(),
-		Steps:             c.snapshotSteps(),
-		Protocols:         c.snapshotProtocols(elapsed),
+		Schema:              Schema,
+		Executor:            executor,
+		StartedAt:           c.start,
+		Elapsed:             elapsed,
+		Total:               reqs.h.Count(),
+		DroppedIterations:   c.dropped.Load(),
+		FailureReasons:      reasons,
+		Iterations:          c.snapshotIterations(),
+		Checks:              c.snapshotChecks(),
+		Steps:               c.snapshotSteps(),
+		Protocols:           c.snapshotProtocols(elapsed),
+		TTFB:                c.snapshotTTFB(),
+		VUsPeak:             c.vuPeak.Load(),
+		VUsMax:              c.MaxVUs(),
+		IterationsStarted:   c.started.Load(),
+		IterationsCompleted: c.ran.Load(),
 	}
+	for _, p := range res.Protocols {
+		res.BytesSent += p.BytesSent
+		res.BytesReceived += p.BytesReceived
+	}
+	var checkFails int64
+	for _, ch := range res.Checks {
+		checkFails += ch.Fails
+	}
+	c.checkMu.Lock()
+	failedCheck := c.failedCheck
+	c.checkMu.Unlock()
+	errs.add(failure.CheckFailed, checkFails, func() string { return failure.SampleText(failedCheck) })
+	res.Errors = errs.list()
 	if w := dropWarning(c.ran.Load(), res.DroppedIterations); w != "" {
 		res.Warnings = append(res.Warnings, w)
 	}
@@ -472,6 +635,19 @@ func sortedReasons(counts map[string]int64) []FailureReason {
 		return out[i].Reason < out[j].Reason
 	})
 	return out
+}
+
+// snapshotTTFB is the time to first byte of the run's calls, or nil when no
+// call measured it.
+func (c *Collector) snapshotTTFB() *Latency {
+	c.callMu.Lock()
+	d := c.ttfb.snapshot()
+	c.callMu.Unlock()
+	if d.h.Count() == 0 {
+		return nil
+	}
+	l := d.latency()
+	return &l
 }
 
 // snapshotIterations is the iteration totals of a run whose requests are

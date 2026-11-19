@@ -1,10 +1,6 @@
 package report
 
-import (
-	"time"
-
-	"github.com/vegaload/vegaload/internal/hist"
-)
+import "time"
 
 // BucketStat is what one one-second bucket of a run holds: the calls that
 // started in that second. Requests, Failed, RPS and ErrorRate are the same
@@ -22,6 +18,41 @@ type BucketStat struct {
 	P99         time.Duration
 	Total       int64 // calls in this and every earlier bucket, as emitted
 	TotalFailed int64
+
+	// Min, Mean, Max and P90 are the bucket's other latency figures.
+	Min, Mean, Max, P90 time.Duration
+
+	// ActiveVUs is the most VUs that ran at once in the bucket's second.
+	// MaxVUs is the planned maximum, or the most seen so far when higher.
+	ActiveVUs, MaxVUs int64
+
+	// The iterations that started in this second, those of them that
+	// completed, and the arrivals due in it that were dropped. The *Total
+	// fields add up this and every earlier bucket, as emitted.
+	IterationsStarted, IterationsCompleted, IterationsDropped                int64
+	IterationsStartedTotal, IterationsCompletedTotal, IterationsDroppedTotal int64
+
+	// Bytes of the calls that started in this second, and the running totals.
+	BytesSent, BytesReceived           int64
+	BytesSentTotal, BytesReceivedTotal int64
+
+	// TTFBCount is how many calls measured a time to first byte; TTFBP50 and
+	// TTFBP95 are zero when none did.
+	TTFBCount        int64
+	TTFBP50, TTFBP95 time.Duration
+
+	// Checks made in this second, and the running totals.
+	ChecksPassed, ChecksFailed           int64
+	ChecksPassedTotal, ChecksFailedTotal int64
+
+	// Steps is each step that ran in this second, by name. Rows is the
+	// MaxPointRows protocol rows with the most calls in it, most first.
+	// Errors is the failed requests of this second by kind, and the failed
+	// checks under "check failed".
+	Steps  []BucketStep
+	Rows   []BucketRow
+	Errors map[string]int64
+
 	// Capped is true when the bucket was handed out while a call that started
 	// in it, or in an earlier second, was still running, because the hold hit
 	// its limit (LiveMaxHold). The bucket then lacks that call; the final
@@ -61,6 +92,13 @@ type LiveBuckets struct {
 	total   int64
 	failed  int64
 	maxHold time.Duration
+
+	// The running totals of the extra fields, and the VUs running at the end
+	// of the last bucket handed out.
+	started, completed, dropped int64
+	sent, received              int64
+	passed, checkFails          int64
+	vus                         int64
 }
 
 // LiveBuckets returns a cursor over the collector's buckets, from the first.
@@ -114,13 +152,13 @@ func (l *LiveBuckets) Rest() []BucketStat {
 	return l.take(l.next, last)
 }
 
-// take computes buckets from..to (both included), drops their histograms, and
+// take computes buckets from..to (both included), drops their live state, and
 // advances the cursor past them. A call recorded later for one of these
-// seconds still counts in the final series, but no histogram is kept for it.
+// seconds still counts in the final series, but no live state is kept for it.
 func (l *LiveBuckets) take(from, to int64) []BucketStat {
 	n := int(to - from + 1)
 	counts := make([]bucketAccum, n)
-	hists := make([]*hist.Histogram, n)
+	secs := make([]*liveSec, n)
 	c := l.c
 	c.mu.Lock()
 	for k := 0; k < n; k++ {
@@ -128,15 +166,16 @@ func (l *LiveBuckets) take(from, to int64) []BucketStat {
 		if idx < int64(len(c.secs)) {
 			counts[k] = c.secs[idx]
 		}
-		if h, ok := c.liveHists[idx]; ok {
-			hists[k] = h
-			delete(c.liveHists, idx)
+		if s, ok := c.live[idx]; ok {
+			secs[k] = s
+			delete(c.live, idx)
 		}
 	}
 	if to+1 > c.liveNext {
 		c.liveNext = to + 1
 	}
 	c.mu.Unlock()
+	maxVUs := c.MaxVUs()
 
 	out := make([]BucketStat, n)
 	for k := 0; k < n; k++ {
@@ -147,15 +186,52 @@ func (l *LiveBuckets) take(from, to int64) []BucketStat {
 			Failed:    a.failed,
 			RPS:       float64(a.count) / bucketWidth.Seconds(),
 			ErrorRate: rateOf(a.failed, a.count),
+			MaxVUs:    maxVUs,
+			ActiveVUs: l.vus,
 		}
-		if h := hists[k]; h != nil {
-			b.P50, b.P95, b.P99 = h.Percentile(50), h.Percentile(95), h.Percentile(99)
+		if s := secs[k]; s != nil {
+			l.fill(&b, s)
 		}
 		l.total += b.Requests
 		l.failed += b.Failed
 		b.Total, b.TotalFailed = l.total, l.failed
+		l.started += b.IterationsStarted
+		l.completed += b.IterationsCompleted
+		l.dropped += b.IterationsDropped
+		b.IterationsStartedTotal, b.IterationsCompletedTotal, b.IterationsDroppedTotal = l.started, l.completed, l.dropped
+		l.sent += b.BytesSent
+		l.received += b.BytesReceived
+		b.BytesSentTotal, b.BytesReceivedTotal = l.sent, l.received
+		l.passed += b.ChecksPassed
+		l.checkFails += b.ChecksFailed
+		b.ChecksPassedTotal, b.ChecksFailedTotal = l.passed, l.checkFails
 		out[k] = b
 	}
 	l.next = to + 1
 	return out
+}
+
+// fill sets the fields of b that come from the second's live state.
+func (l *LiveBuckets) fill(b *BucketStat, s *liveSec) {
+	if h := &s.lat; h.Count() > 0 {
+		b.P50, b.P95, b.P99 = h.Percentile(50), h.Percentile(95), h.Percentile(99)
+		b.Min, b.Mean, b.Max, b.P90 = h.Min(), h.Mean(), h.Max(), h.Percentile(90)
+	}
+	if s.vuSet {
+		// The VUs running as the second began ran in it too.
+		b.ActiveVUs = max(l.vus, s.vuPeak)
+		l.vus = s.vuEnd
+	}
+	b.IterationsStarted, b.IterationsCompleted, b.IterationsDropped = s.started, s.completed, s.dropped
+	b.BytesSent, b.BytesReceived = s.sent, s.received
+	if n := s.ttfb.Count(); n > 0 {
+		b.TTFBCount = n
+		b.TTFBP50, b.TTFBP95 = s.ttfb.Percentile(50), s.ttfb.Percentile(95)
+	}
+	b.ChecksPassed, b.ChecksFailed = s.checksPassed, s.checksFailed
+	b.Steps = s.bucketSteps()
+	b.Rows = s.bucketRows()
+	if len(s.errors) > 0 {
+		b.Errors = s.errors
+	}
 }

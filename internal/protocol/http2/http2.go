@@ -126,6 +126,7 @@ func (d *Driver) Do(ctx context.Context) (protocol.Result, error) {
 		defer t.CloseIdleConnections()
 		client = &http.Client{Transport: t, Timeout: d.timeout}
 	}
+	req, fb := protocol.TraceFirstByte(req)
 	resp, err := client.Do(req)
 	if err != nil {
 		// Includes the target not actually speaking HTTP/2 (TLS ALPN
@@ -147,6 +148,7 @@ func (d *Driver) Do(ctx context.Context) (protocol.Result, error) {
 		StatusCode:    resp.StatusCode,
 		BytesSent:     int64(len(d.target.Body)),
 		BytesReceived: received,
+		TTFB:          fb.TTFB(),
 	}, nil
 }
 

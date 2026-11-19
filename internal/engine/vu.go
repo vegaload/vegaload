@@ -20,6 +20,9 @@ import (
 // stop; protocol implementations are expected to respect ctx.
 func runVU(ctx context.Context, vuID int, iter IterationFunc, rec Recorder) {
 	tr, _ := rec.(IterationTracker)
+	vt := vuTracking(rec)
+	vt.VUStarted()
+	defer vt.VUStopped()
 	for {
 		if runEnded(ctx) {
 			return

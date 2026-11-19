@@ -362,7 +362,7 @@ func (f *pointFeed) finishWith(warnings []string) {
 }
 
 func toPoint(b report.BucketStat) stream.Point {
-	return stream.Point{
+	p := stream.Point{
 		OffsetS:     b.Offset.Seconds(),
 		RPS:         b.RPS,
 		Requests:    b.Requests,
@@ -373,7 +373,48 @@ func toPoint(b report.BucketStat) stream.Point {
 		P99Ms:       ms(b.P99),
 		Total:       b.Total,
 		TotalFailed: b.TotalFailed,
+
+		MinMs: ms(b.Min),
+		AvgMs: ms(b.Mean),
+		MaxMs: ms(b.Max),
+		P90Ms: ms(b.P90),
+
+		ActiveVUs: b.ActiveVUs,
+		MaxVUs:    b.MaxVUs,
+
+		IterationsStarted:        b.IterationsStarted,
+		IterationsCompleted:      b.IterationsCompleted,
+		IterationsDropped:        b.IterationsDropped,
+		IterationsStartedTotal:   b.IterationsStartedTotal,
+		IterationsCompletedTotal: b.IterationsCompletedTotal,
+		IterationsDroppedTotal:   b.IterationsDroppedTotal,
+
+		BytesSent:          b.BytesSent,
+		BytesReceived:      b.BytesReceived,
+		BytesSentTotal:     b.BytesSentTotal,
+		BytesReceivedTotal: b.BytesReceivedTotal,
+
+		ChecksPassed:      b.ChecksPassed,
+		ChecksFailed:      b.ChecksFailed,
+		ChecksPassedTotal: b.ChecksPassedTotal,
+		ChecksFailedTotal: b.ChecksFailedTotal,
+
+		Errors: b.Errors,
 	}
+	if b.TTFBCount > 0 {
+		p50, p95 := ms(b.TTFBP50), ms(b.TTFBP95)
+		p.TTFBP50Ms, p.TTFBP95Ms = &p50, &p95
+	}
+	for _, s := range b.Steps {
+		p.Steps = append(p.Steps, stream.PointStep{Name: s.Name, Count: s.Count, Failed: s.Failed, P95Ms: ms(s.P95)})
+	}
+	for _, r := range b.Rows {
+		p.Rows = append(p.Rows, stream.PointRow{
+			Protocol: r.Protocol, Name: r.Name, Method: r.Method, Endpoint: r.Endpoint,
+			Count: r.Count, Failed: r.Failed, P50Ms: ms(r.P50), P95Ms: ms(r.P95), P99Ms: ms(r.P99),
+		})
+	}
+	return p
 }
 
 func ms(d time.Duration) float64 { return math.Round(float64(d)/float64(time.Millisecond)*1000) / 1000 }

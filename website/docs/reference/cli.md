@@ -138,6 +138,13 @@ To share one live view project with litmus-lite (a load run and a chaos run on o
 
 A flag wins over its variable. The live view sends the run's numbers, thresholds, step and protocol names, labels and the target (without credentials) to the service. It never sends headers, bodies, options, environment values, secrets or data. Turn it off with `-no-live` or `VEGALOAD_LIVE=off`.
 
+### Stats endpoint
+
+| Flag | Meaning |
+| --- | --- |
+| `-stats-addr` | Serve the run's cumulative numbers as JSON at `http://ADDR/stats`, in the shape of the Harness k6 stats sidecar, and `{"ok":true}` at `/healthz`. `:9093` listens on every interface. `127.0.0.1:9093` listens on this machine only. The server starts before the load and sends nothing anywhere. An address that is taken stops the run with exit code 2. See [Stats endpoint](../guides/stats-endpoint.md). |
+| `-stats-linger` | With `-stats-addr`: keep serving the final numbers this long after the run, for example `30s`, then exit. Ctrl-C stops it early. Default `0`. |
+
 ### Safety
 
 | Flag | Meaning |

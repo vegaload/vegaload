@@ -207,6 +207,12 @@ type runConfig struct {
 	Stream runStream
 	stream *streaming
 
+	// StatsAddr is -stats-addr: serve /stats there while the run goes on,
+	// and for StatsLinger after it. stats is that server; nil without it.
+	StatsAddr   string
+	StatsLinger time.Duration
+	stats       *statsExporter
+
 	// runCtx ends when the run is stopped by Ctrl-C or SIGTERM. It is nil
 	// when nothing can stop it, such as in a test.
 	runCtx context.Context //nolint:containedctx // set by cmdRun for the one run this config describes
@@ -272,6 +278,10 @@ func parseRunArgs(args []string) (*runConfig, error) {
 
 	// docs/streaming.md: stream the run, and the live view.
 	cfg.Stream.register(fs)
+
+	// The /stats exporter, for a scraper such as the Harness stats sidecar's.
+	fs.StringVar(&cfg.StatsAddr, "stats-addr", "", "serve the run's cumulative numbers as JSON at http://ADDR/stats, in the Harness k6 stats sidecar's shape, plus /healthz. \":9093\" listens on every interface, \"127.0.0.1:9093\" on this machine only. Nothing is sent anywhere")
+	fs.DurationVar(&cfg.StatsLinger, "stats-linger", 0, "with -stats-addr: keep serving the final numbers this long after the run before exiting, e.g. 30s (Ctrl-C stops it)")
 
 	// FR-CLI-11: pass/fail thresholds.
 	fs.Var(&thresholdExprs, "threshold", "pass/fail threshold on the run, e.g. \"p95 < 300ms\", \"p95{step=\\\"login\\\"} < 300ms\" or \"p95{protocol=\\\"ftp\\\"} < 500ms\" (repeatable; metrics: "+strings.Join(threshold.MetricNames(), ", ")+"). A breach exits 3")
@@ -352,6 +362,12 @@ func parseRunArgs(args []string) (*runConfig, error) {
 	})
 	if cfg.AbortGraceSet && !cfg.AbortOnBreach {
 		return nil, fmt.Errorf("-abort-grace needs -abort-on-breach")
+	}
+	if cfg.StatsLinger < 0 {
+		return nil, fmt.Errorf("-stats-linger %s: want zero or more", cfg.StatsLinger)
+	}
+	if cfg.StatsLinger > 0 && cfg.StatsAddr == "" {
+		return nil, fmt.Errorf("-stats-linger needs -stats-addr")
 	}
 
 	if !cfg.NoStepSummary {
@@ -738,6 +754,9 @@ func recordDriverCall(rec netapi.CallRecorder, ctx context.Context, protocolName
 		return false
 	}
 	rec.RecordCall(protocolName, op, d, err, res.BytesSent, res.BytesReceived)
+	if res.TTFB > 0 {
+		rec.RecordMeasure(protocolName, protocol.TTFBMeasure, res.TTFB)
+	}
 	return true
 }
 
@@ -773,6 +792,7 @@ func runScenarioWithCollector(cfg *runConfig, collector *report.Collector) (*rep
 	cfg.checkRecorder = collector
 	cfg.stepRecorder = collector
 	cfg.callRecorder = collector
+	collector.SetPlannedVUs(concurrencyHint(cfg))
 	// A scenario's iteration can make any number of calls, so each call,
 	// not each iteration, is one request of the run.
 	if cfg.ScenarioPath != "" {
@@ -805,6 +825,7 @@ func runScenarioWithCollector(cfg *runConfig, collector *report.Collector) (*rep
 	// A streamed run says it has started once it is ready to send load. A
 	// scenario that cannot be loaded, or whose setup fails, still ends with
 	// a run.failed after a run.started (see streaming.end).
+	cfg.stats.attach(collector, ex.Name())
 	var feed *pointFeed
 	if cfg.stream != nil {
 		feed = cfg.stream.begin(cfg, ex, collector)
@@ -989,6 +1010,19 @@ func cmdRun(args []string) int {
 		abortNote(os.Stderr, cfg.Thresholds)
 	}
 
+	// The /stats server listens before anything else starts, so an address
+	// that is taken stops the run before any load or stream.
+	if cfg.StatsAddr != "" {
+		se, err := startStats(cfg.StatsAddr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "vegaload run: -stats-addr: %v\n", err)
+			return 2
+		}
+		defer se.close()
+		cfg.stats = se
+		fmt.Fprintf(os.Stderr, "stats: %s\n", se.url())
+	}
+
 	// The stream and the live view, when there is one. A destination that
 	// breaks a rule stops the run before it starts.
 	st, err := cfg.Stream.setup(cfg.NoOpen)
@@ -1006,11 +1040,16 @@ func cmdRun(args []string) int {
 	sigs := watchRunSignals(st)
 	cfg.runCtx = sigs.ctx
 	code := executeRun(cfg, &out)
+	cfg.stats.finish(out.result)
 	sigs.stop()
-	if sig := sigs.received(); sig != nil {
+	sig := sigs.received()
+	if sig != nil {
 		code = signalExitCode(sig)
 	}
 	st.end(cfg, &out, code)
+	if sig == nil {
+		cfg.stats.linger(cfg.StatsLinger, os.Stderr)
+	}
 	return code
 }
 
@@ -1245,6 +1284,7 @@ func printResult(w io.Writer, r *report.Result) {
 	fmt.Fprintf(w, "  total:    %d\n", r.Total)
 	fmt.Fprintf(w, "  failed:   %d\n", r.Failed)
 	fmt.Fprintf(w, "  mean:     %s\n", r.Latency.Mean)
+	printLoad(w, r)
 	if len(r.FailureReasons) > 0 {
 		fmt.Fprintf(w, "  failures: %s\n", failureReasonsText(r.FailureReasons))
 	}
@@ -1257,6 +1297,7 @@ func printResult(w io.Writer, r *report.Result) {
 	for _, warning := range r.Warnings {
 		fmt.Fprintf(w, "  WARNING:  %s\n", warning)
 	}
+	printErrorKinds(w, r)
 	printIterations(w, r)
 	printChecks(w, r)
 	printSteps(w, r)
@@ -1265,6 +1306,34 @@ func printResult(w io.Writer, r *report.Result) {
 	printProtocols(w, r)
 	printThresholds(w, r)
 	printBaseline(w, r)
+}
+
+// printLoad writes the VUs, iterations, bytes and time to first byte of the
+// run, each line only when the run has it.
+func printLoad(w io.Writer, r *report.Result) {
+	if r.VUsPeak > 0 {
+		fmt.Fprintf(w, "  vus:      peak %d of %d\n", r.VUsPeak, r.VUsMax)
+	}
+	if r.IterationsStarted > 0 || r.IterationsCompleted > 0 {
+		fmt.Fprintf(w, "  iters:    %d started, %d completed\n", r.IterationsStarted, r.IterationsCompleted)
+	}
+	if r.BytesSent > 0 || r.BytesReceived > 0 {
+		fmt.Fprintf(w, "  bytes:    %s sent, %s received\n", report.FormatByteCount(r.BytesSent), report.FormatByteCount(r.BytesReceived))
+	}
+	if t := r.TTFB; t != nil {
+		fmt.Fprintf(w, "  ttfb:     p50 %s  p95 %s  p99 %s\n", t.P50.Round(time.Microsecond), t.P95.Round(time.Microsecond), t.P99.Round(time.Microsecond))
+	}
+}
+
+// printErrorKinds writes one sample message for each kind of failure.
+func printErrorKinds(w io.Writer, r *report.Result) {
+	if len(r.Errors) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "\nerrors by kind (one sample each)")
+	for _, e := range r.Errors {
+		fmt.Fprintf(w, "  %8d  %-18s  %s\n", e.Count, e.Kind, e.Sample)
+	}
 }
 
 // failureReasonsText lists the failure counts, e.g. "12 status 503, 3 timeout".

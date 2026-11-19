@@ -411,6 +411,7 @@ func (c *HTTPClient) Do(ctx context.Context, method, rawURL string, body []byte,
 		Jar:           c.jar,
 	}
 
+	req, fb := protocol.TraceFirstByte(req)
 	start := time.Now()
 	resp, err := client.Do(req)
 	if err != nil {
@@ -424,7 +425,9 @@ func (c *HTTPClient) Do(ctx context.Context, method, rawURL string, body []byte,
 	if callErr == nil {
 		callErr = statusFailure(resp.StatusCode, opts.ExpectedStatuses)
 	}
-	c.recordHTTP(ctx, row, time.Since(start), callErr, int64(len(body)), int64(len(data)))
+	if c.recordHTTP(ctx, row, time.Since(start), callErr, int64(len(body)), int64(len(data))) && fb.TTFB() > 0 {
+		c.calls.RecordMeasure("http", protocol.TTFBMeasure, fb.TTFB())
+	}
 	if err != nil {
 		return nil, fmt.Errorf("netapi: reading response body: %w", err)
 	}
@@ -436,15 +439,17 @@ func (c *HTTPClient) Do(ctx context.Context, method, rawURL string, body []byte,
 	}, nil
 }
 
-// recordHTTP counts one call under its row, such as "GET /users/{id}".
-func (c *HTTPClient) recordHTTP(ctx context.Context, row string, d time.Duration, err error, sent, received int64) {
+// recordHTTP counts one call under its row, such as "GET /users/{id}", and
+// reports whether it did.
+func (c *HTTPClient) recordHTTP(ctx context.Context, row string, d time.Duration, err error, sent, received int64) bool {
 	if c == nil || c.calls == nil {
-		return
+		return false
 	}
 	if err != nil && RunEnded(ctx) {
-		return
+		return false
 	}
 	c.calls.RecordCall("http", row, d, err, sent, received)
+	return true
 }
 
 // defaultMaxRedirects is how many redirects net/http follows when a call

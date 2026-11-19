@@ -123,6 +123,7 @@ func (d *Driver) Do(ctx context.Context) (protocol.Result, error) {
 		req.Header.Set(k, v)
 	}
 
+	req, fb := protocol.TraceFirstByte(req)
 	resp, err := d.client.Do(req)
 	if err != nil {
 		return protocol.Result{
@@ -139,6 +140,7 @@ func (d *Driver) Do(ctx context.Context) (protocol.Result, error) {
 		StatusCode:    resp.StatusCode,
 		BytesSent:     int64(len(d.target.Body)),
 		BytesReceived: received,
+		TTFB:          fb.TTFB(),
 	}, nil
 }
 

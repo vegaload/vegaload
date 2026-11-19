@@ -88,7 +88,7 @@ set its own with `timeout`, and also takes `redirects` and `params`. See
 
 Each failed request has a reason: `timeout`, `status 503` (the status it
 got), `connection refused`, `connection reset`, `dns`, `tls` or `error`. The
-summary prints them as `failures:`, and the JSON has them as `failure_reasons`.
+summary prints them as `failures:`, and the JSON has them as `failure_reasons`. The JSON also groups them by kind in `errors`, each with the message of the first failure of that kind (masked and without `-secret-env` values).
 
 ## Groups
 
