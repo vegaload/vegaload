@@ -50,6 +50,16 @@ type Target struct {
 	// error, so a typo is never silently ignored. It is nil when none
 	// were given.
 	Options map[string]string
+	// MaxConns is the most calls the run can have in flight at once
+	// through one driver: its peak VU count. A driver shared by every VU
+	// that keeps a pool of connections sizes the pool from it, so a busy
+	// run reuses its connections instead of opening one per call. Zero
+	// means unknown, and the driver keeps its own default.
+	MaxConns int
+	// NoConnectionReuse makes every call open a new connection and close
+	// it afterwards (-no-connection-reuse), for a test that wants to
+	// measure connection setup on purpose.
+	NoConnectionReuse bool
 }
 
 // Option returns the value of an option key, or def if it was not set.

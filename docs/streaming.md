@@ -40,7 +40,7 @@ Delivery is at least once. A consumer dedupes on `(runId, seq)`. Unknown fields 
 | --- | --- |
 | `run.started` | First event of every stream. |
 | `point` | Once per second, after each one-second bucket closes. |
-| `warning` | Something the user should know, for example dropped events, or more than 1% of the planned iterations dropped because every VU was busy (sent after the last `point`, before `run.finished`). |
+| `warning` | Something the user should know, for example dropped events, more than 1% of the planned iterations dropped because every VU was busy, or `generator overloaded: ...` when the machine running VegaLoad could not keep up (these last two are sent after the last `point`, before `run.finished`). |
 | `run.finished` | Last event of a run that ran to its end, passed or not. |
 | `run.failed` | Last event of a run that could not run or was interrupted. |
 
@@ -98,7 +98,7 @@ The bucket width is the same one-second width as the final `time_series` in the 
 
 ### `run.finished`
 
-`data` is the run's structured result, exactly what `-out` writes (the `report.Result` JSON: `executor`, `started_at`, `elapsed_ns`, `total`, `failed`, `error_rate`, `latency`, `time_series`, and when present `thresholds`, `thresholds_passed`, `aborted`, `baseline`, `steps`, `protocols`, `checks`, `data_files`), plus:
+`data` is the run's structured result, exactly what `-out` writes (the `report.Result` JSON: `executor`, `started_at`, `elapsed_ns`, `total`, `failed`, `error_rate`, `latency`, `time_series`, and when present `warnings`, `generator`, `thresholds`, `thresholds_passed`, `aborted`, `baseline`, `steps`, `protocols`, `checks`, `data_files`), plus:
 
 | Field | Type | Notes |
 | --- | --- | --- |

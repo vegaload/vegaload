@@ -45,7 +45,19 @@ The sample app fails about 3% of creates on purpose. The run shows a failure rat
 | `-body` | The request body. |
 | `-timeout` | The limit for one request. The default is 30 seconds. A request that runs out of time fails with the reason `timeout`. |
 | `-insecure` | Skip the TLS certificate check. |
+| `-no-connection-reuse` | Open a new connection for every request. See [Connections](#connections). |
 | `-data` | Fill `{data.NAME.COLUMN}` in `-body` from a CSV or JSON file. See [Data files](/guides/data-files). |
+
+## Connections
+
+VegaLoad keeps connections open between requests, as a browser or an API client does. Each user keeps its own connection, so 50 users hold about 50 connections for the whole run. This is true for `-protocol http1` and for the `http` calls of a scenario, with or without `insecure`. HTTP/2 sends every user's requests over one connection per host.
+
+To test connection setup on purpose, add `-no-connection-reuse`. Every request then opens a new connection and closes it. Pace such a run with `-executor constant-arrival-rate`, or the machine can run out of local ports:
+
+```bash
+vegaload run -target http://127.0.0.1:8080/widgets -protocol http1 -no-connection-reuse \
+  -executor constant-arrival-rate -rate 50 -max-vus 10 -duration 5s
+```
 
 ## HTTP/2
 
@@ -86,6 +98,31 @@ vegaload run -vus 5 -duration 10s crud-flow.vl.js
 ```
 
 Flags go before the scenario file. See [Scenarios](/guides/scenarios) for the full script reference.
+
+### Request options
+
+Each `http` call takes options. These three change how one request is sent:
+
+| Option | What it does |
+| --- | --- |
+| `timeout` | The limit for this request. It replaces `-timeout` for this call. In JavaScript, a number is milliseconds. In Python, a number is seconds. Both take a duration string such as `"500ms"` or `"5s"`. A request that runs out of time fails with the reason `timeout`. |
+| `redirects` | How many redirects to follow. `0` does not follow: the script gets the 3xx answer. The default follows up to 10. More than the limit fails the call. |
+| `params` | Query parameters to add to the URL, encoded for you. A list repeats the name. A query already in the URL is kept. |
+
+```js
+const res = http.get("http://127.0.0.1:8080/widgets", {
+  params: { limit: 10, tag: ["a", "b"] }, // ?limit=10&tag=a&tag=b
+  timeout: "2s",
+  redirects: 0,
+});
+```
+
+```python
+res = http.get("http://127.0.0.1:8080/widgets",
+               params={"limit": 10, "tag": ["a", "b"]}, timeout=2, redirects=0)
+```
+
+A value of the wrong type throws an error the script can catch, and no request is sent.
 
 ## Start from what you have
 

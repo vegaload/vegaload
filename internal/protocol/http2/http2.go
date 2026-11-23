@@ -32,11 +32,18 @@ import (
 // Options are the -opt keys this driver accepts.
 var Options = slices.Clone(tlsconf.Keys)
 
-// Driver is an HTTP/2 protocol.Protocol.
+// Driver is an HTTP/2 protocol.Protocol. Every VU shares its one
+// transport, which multiplexes their calls as streams over a connection
+// per host, so it needs no pool sized from target.MaxConns. With
+// target.NoConnectionReuse each call gets a transport of its own,
+// closed when the call ends, because HTTP/2 has no per-request way to
+// close a connection.
 type Driver struct {
-	target    protocol.Target
-	client    *http.Client
-	transport *http2.Transport
+	target       protocol.Target
+	client       *http.Client
+	transport    *http2.Transport
+	timeout      time.Duration
+	newTransport func() *http2.Transport
 }
 
 // New returns a ready-to-use Driver for target. timeout bounds each
@@ -62,25 +69,31 @@ func New(target protocol.Target, timeout time.Duration) (*Driver, error) {
 	if err := tlsconf.FromOptions(target.Options).Apply(cfg, target.InsecureSkipVerify, tlsOn); err != nil {
 		return nil, fmt.Errorf("http2: %w", err)
 	}
-	transport := &http2.Transport{TLSClientConfig: cfg}
-
-	if u.Scheme == "http" {
-		// h2c: speak HTTP/2 framing directly over a plain TCP
-		// connection, with no TLS handshake and therefore no ALPN to
-		// negotiate it. AllowHTTP plus a DialTLSContext override that
-		// just dials TCP is the documented way to get http2.Transport
-		// to do this for a plaintext target.
-		transport.AllowHTTP = true
-		transport.DialTLSContext = func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
-			var d net.Dialer
-			return d.DialContext(ctx, network, addr)
+	h2c := u.Scheme == "http"
+	newTransport := func() *http2.Transport {
+		t := &http2.Transport{TLSClientConfig: cfg}
+		if h2c {
+			// h2c: speak HTTP/2 framing directly over a plain TCP
+			// connection, with no TLS handshake and therefore no ALPN to
+			// negotiate it. AllowHTTP plus a DialTLSContext override that
+			// just dials TCP is the documented way to get http2.Transport
+			// to do this for a plaintext target.
+			t.AllowHTTP = true
+			t.DialTLSContext = func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, network, addr)
+			}
 		}
+		return t
 	}
 
+	transport := newTransport()
 	return &Driver{
-		target:    target,
-		client:    &http.Client{Transport: transport, Timeout: timeout},
-		transport: transport,
+		target:       target,
+		client:       &http.Client{Transport: transport, Timeout: timeout},
+		transport:    transport,
+		timeout:      timeout,
+		newTransport: newTransport,
 	}, nil
 }
 
@@ -107,7 +120,13 @@ func (d *Driver) Do(ctx context.Context) (protocol.Result, error) {
 		req.Header.Set(k, v)
 	}
 
-	resp, err := d.client.Do(req)
+	client := d.client
+	if d.target.NoConnectionReuse {
+		t := d.newTransport()
+		defer t.CloseIdleConnections()
+		client = &http.Client{Transport: t, Timeout: d.timeout}
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		// Includes the target not actually speaking HTTP/2 (TLS ALPN
 		// negotiated http/1.1, or a plain server that isn't h2c) —

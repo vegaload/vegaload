@@ -82,7 +82,9 @@ r = http.get(base + "/widgets/999", expected_statuses=[404])
 ```
 
 The list replaces the default rule for that call, so `[200]` makes a 302 a
-failure too. `-timeout` is the time limit for each call.
+failure too. `-timeout` is the time limit for each call. An HTTP call can
+set its own with `timeout`, and also takes `redirects` and `params`. See
+[Request options](/guides/http#request-options).
 
 Each failed request has a reason: `timeout`, `status 503` (the status it
 got), `connection refused`, `connection reset`, `dns`, `tls` or `error`. The

@@ -25,10 +25,12 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -128,6 +130,16 @@ type Options struct {
 	// pass, 400 or higher fails. Check it with CheckExpectedStatuses.
 	// WebSocket ignores it.
 	ExpectedStatuses []int
+	// Timeout replaces the client's time limit (the run's -timeout) for
+	// this HTTP call when it is above zero. Read it with ParseTimeout.
+	Timeout time.Duration
+	// Redirects is how many redirects this HTTP call follows. Nil keeps
+	// Go's default of up to 10; 0 hands the 3xx answer to the script.
+	// Read it with ParseRedirects.
+	Redirects *int
+	// Params are query parameters added to the URL of this HTTP call,
+	// after any query the URL already has. Read them with ParseParams.
+	Params url.Values
 	// Recorder counts a WebSocket connect. Scripts do not set it. HTTP
 	// uses the recorder on HTTPClient instead.
 	Recorder CallRecorder
@@ -193,16 +205,46 @@ type HTTPResponse struct {
 	Body       []byte
 }
 
-// HTTPClient is one VU's HTTP client: one underlying *http.Client (and
-// its connection pool) reused across every call for the life of the VU,
-// the same keep-alive behaviour internal/protocol/http1.Driver gives a
-// fixed target, just now available for a script's own ad hoc URLs.
+// HTTPClient is one VU's HTTP client: one connection pool reused across
+// every call for the life of the VU, the same keep-alive behaviour
+// internal/protocol/http1.Driver gives a fixed target, just now
+// available for a script's own ad hoc URLs.
+//
+// The pool belongs to the VU, not the run. A VU makes one call at a
+// time, so it needs at most one open connection per host it talks to,
+// and N VUs hold about N connections, however many calls they make;
+// the connections live and close with the VU, as a real user's would.
+// A pool shared by the whole run would also have to be sized from the
+// run's VU count, and Go's default (http.DefaultTransport, two idle
+// connections per host) closes a connection after nearly every call
+// once more than two VUs share it.
 type HTTPClient struct {
-	client  *http.Client
-	check   SafetyCheck
-	timeout time.Duration
-	calls   CallRecorder
+	check     SafetyCheck
+	timeout   time.Duration
+	calls     CallRecorder
+	noReuse   bool
+	transport *http.Transport
+
+	// insecure is the pool for calls with InsecureSkipVerify, made on
+	// the first such call and reused after it.
+	insecureOnce sync.Once
+	insecure     *http.Transport
 }
+
+// A VU makes one call at a time, so it keeps one connection per host in
+// use. The spare idle room covers a script that switches between a few
+// hosts and the moment a VU's last answer is being read.
+const (
+	vuMaxIdleConns        = 100
+	vuMaxIdleConnsPerHost = 4
+)
+
+// HTTPOption changes how NewHTTPClient builds a client.
+type HTTPOption func(*HTTPClient)
+
+// NoConnectionReuse closes each connection after one call, so every call
+// opens a new one (-no-connection-reuse).
+func NoConnectionReuse() HTTPOption { return func(c *HTTPClient) { c.noReuse = true } }
 
 // SetCallRecorder counts this client's HTTP calls. Nil means not counted.
 func (c *HTTPClient) SetCallRecorder(r CallRecorder) {
@@ -215,19 +257,54 @@ func (c *HTTPClient) SetCallRecorder(r CallRecorder) {
 // against every call's target host before connecting. timeout bounds
 // each individual request the same way protocol/http1.New's timeout
 // does; 0 means no per-request timeout beyond the context passed to Do.
-func NewHTTPClient(check SafetyCheck, timeout time.Duration) *HTTPClient {
-	return &HTTPClient{
-		client:  &http.Client{Timeout: timeout},
+func NewHTTPClient(check SafetyCheck, timeout time.Duration, opts ...HTTPOption) *HTTPClient {
+	c := &HTTPClient{
 		check:   check,
 		timeout: timeout,
 	}
+	for _, opt := range opts {
+		opt(c)
+	}
+	c.transport = c.newTransport(nil)
+	return c
+}
+
+// newTransport has http.DefaultTransport's settings (proxy from the
+// environment, dial and TLS handshake time limits, HTTP/2 when the
+// server offers it) with the pool sized for one VU.
+func (c *HTTPClient) newTransport(tlsCfg *tls.Config) *http.Transport {
+	return &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		TLSClientConfig:       tlsCfg,
+		MaxIdleConns:          vuMaxIdleConns,
+		MaxIdleConnsPerHost:   vuMaxIdleConnsPerHost,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: time.Second,
+		DisableKeepAlives:     c.noReuse,
+	}
+}
+
+func (c *HTTPClient) insecureTransport() *http.Transport {
+	c.insecureOnce.Do(func() {
+		c.insecure = c.newTransport(&tls.Config{InsecureSkipVerify: true}) //nolint:gosec // opt-in, see Options
+	})
+	return c.insecure
 }
 
 // Do performs one HTTP request. method defaults to GET if empty; body
-// may be nil. opts.InsecureSkipVerify, when set, uses a dedicated
-// one-shot transport for this call rather than mutating the client's
-// shared one, since a script may hit several hosts with different TLS
-// needs across one iteration.
+// may be nil. opts.InsecureSkipVerify, when set, uses the client's
+// second pool, kept for such calls, rather than changing the TLS
+// settings of the first, since a script may hit several hosts with
+// different TLS needs across one iteration.
+//
+// Every redirect is checked against the SafetyCheck too, because it
+// connects to a host of its own.
 //
 // An answer is returned whatever its status, so the script can read it.
 // A status the call does not accept (see Options.ExpectedStatuses) is
@@ -238,6 +315,15 @@ func (c *HTTPClient) Do(ctx context.Context, method, rawURL string, body []byte,
 	}
 	if err := CheckExpectedStatuses(opts.ExpectedStatuses); err != nil {
 		return nil, fmt.Errorf("netapi: expected statuses: %w", err)
+	}
+	if opts.Redirects != nil && *opts.Redirects < 0 {
+		return nil, fmt.Errorf("netapi: redirects: want 0 or more, not %d", *opts.Redirects)
+	}
+	if len(opts.Params) > 0 {
+		var err error
+		if rawURL, err = addParams(rawURL, opts.Params); err != nil {
+			return nil, err
+		}
 	}
 	if err := checkHost(c.check, rawURL); err != nil {
 		return nil, err
@@ -255,12 +341,20 @@ func (c *HTTPClient) Do(ctx context.Context, method, rawURL string, body []byte,
 		req.Header.Set(k, v)
 	}
 
-	client := c.client
+	transport := c.transport
 	if opts.InsecureSkipVerify {
-		client = &http.Client{
-			Timeout:   c.timeout,
-			Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}, //nolint:gosec // opt-in, see Options
-		}
+		transport = c.insecureTransport()
+	}
+	timeout := c.timeout
+	if opts.Timeout > 0 {
+		timeout = opts.Timeout
+	}
+	// http.Client is a few fields over the shared transport; one per call
+	// lets each call have its own time limit and redirect rule.
+	client := &http.Client{
+		Transport:     transport,
+		Timeout:       timeout,
+		CheckRedirect: c.redirectPolicy(opts.Redirects),
 	}
 
 	start := time.Now()
@@ -310,11 +404,60 @@ func httpOp(method string) string {
 	}
 }
 
+// defaultMaxRedirects is how many redirects net/http follows when a call
+// does not say.
+const defaultMaxRedirects = 10
+
+// redirectPolicy is the CheckRedirect of one call: the next hop must pass
+// the SafetyCheck, and at most redirects are followed (nil: Go's
+// default). With 0 the 3xx answer itself is returned.
+func (c *HTTPClient) redirectPolicy(redirects *int) func(*http.Request, []*http.Request) error {
+	return func(req *http.Request, via []*http.Request) error {
+		limit := defaultMaxRedirects
+		if redirects != nil {
+			limit = *redirects
+		}
+		if limit == 0 {
+			return http.ErrUseLastResponse
+		}
+		// via holds the requests already sent: the first one and every
+		// redirect followed so far.
+		if len(via) > limit {
+			return fmt.Errorf("stopped after %d redirects", len(via)-1)
+		}
+		if c.check != nil {
+			if err := c.check(req.URL.Hostname()); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+}
+
+// addParams appends params, encoded, to rawURL's query. A query already in
+// rawURL is kept exactly as written.
+func addParams(rawURL string, params url.Values) (string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", fmt.Errorf("netapi: parsing URL %q: %w", urlerr.Mask(rawURL), urlerr.Inner(err))
+	}
+	if u.RawQuery == "" {
+		u.RawQuery = params.Encode()
+	} else {
+		u.RawQuery += "&" + params.Encode()
+	}
+	return u.String(), nil
+}
+
 // Close releases the client's idle connections. Safe to call even if no
 // request was ever made.
 func (c *HTTPClient) Close() {
-	if t, ok := c.client.Transport.(*http.Transport); ok {
-		t.CloseIdleConnections()
+	if c == nil {
+		return
+	}
+	c.transport.CloseIdleConnections()
+	if c.insecure != nil {
+		c.insecure.CloseIdleConnections()
 	}
 }
 

@@ -63,6 +63,7 @@ Give a scenario file, or give `-target` and `-protocol` for a protocol-direct ru
 | `-opt` | A driver option, `key=value`. Repeat the flag. Each protocol has its own keys: see [Protocol options](./protocol-options.md). |
 | `-insecure` | Skip TLS certificate checks. |
 | `-timeout` | Time limit for each request: each `-protocol` call, or each call a scenario makes. A request that runs out of time fails with the reason `timeout`. Default `30s`. |
+| `-no-connection-reuse` | Open a new connection for every HTTP request, in a scenario and in `-protocol http1` or `http2`, instead of keeping connections open between requests. Use it to measure connection setup on purpose. |
 
 ### Load shape
 

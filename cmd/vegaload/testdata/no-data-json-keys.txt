@@ -2,6 +2,7 @@ elapsed_ns
 error_rate
 executor
 failed
+generator
 latency
 protocols
 started_at
