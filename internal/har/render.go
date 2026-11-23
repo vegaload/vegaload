@@ -313,6 +313,10 @@ func renderCall(n int, q *request) string {
 			opts = append(opts, "    body: "+renderParts(q.text)+",\n")
 		}
 	}
+	if q.status >= 400 {
+		// Without it, the answer the recording had would count as a failed request.
+		opts = append(opts, fmt.Sprintf("    expectedStatuses: [%d],\n", q.status))
+	}
 	var sb strings.Builder
 	url := renderParts(q.url)
 	if fn, ok := verbFuncs[q.method]; ok {

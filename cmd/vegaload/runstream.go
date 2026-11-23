@@ -355,6 +355,15 @@ func (f *pointFeed) finish() {
 	})
 }
 
+// finishWith is finish, then the finished run's warnings (such as many
+// dropped iterations), so a consumer has them before run.finished.
+func (f *pointFeed) finishWith(warnings []string) {
+	f.finish()
+	for _, w := range warnings {
+		f.em.Warning(w)
+	}
+}
+
 func toPoint(b report.BucketStat) stream.Point {
 	return stream.Point{
 		OffsetS:     b.Offset.Seconds(),
@@ -494,7 +503,7 @@ func (st *streaming) end(cfg *runConfig, out *runOutcome, code int) {
 		}
 		// The run may have failed before its clock started.
 		if !st.rec.HasStarted() {
-			st.rec.Started(time.Now(), buildRunStarted(cfg, cfg.Executor, cfg.Duration))
+			st.rec.Started(time.Now(), buildRunStarted(cfg, cfg.Executor, plannedDuration(cfg)))
 		}
 		st.rec.Failed(reason, st.partialOrNil())
 	}

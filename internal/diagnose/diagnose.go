@@ -10,6 +10,7 @@ package diagnose
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/vegaload/vegaload/internal/report"
 )
@@ -44,8 +45,20 @@ type Bucket struct {
 func Analyze(res *report.Result) Findings {
 	var f Findings
 
+	if d := res.DroppedIterations; d > 0 {
+		planned := d + res.Total
+		if res.Iterations != nil {
+			planned = d + res.Iterations.Total
+		}
+		f.Notes = append(f.Notes, fmt.Sprintf("%d of %d planned iterations (%.1f%%) were dropped because every VU was busy — the target got less load than planned, and the numbers only cover what ran; raise -max-vus", d, planned, 100*float64(d)/float64(planned)))
+	}
+
 	if res.Total == 0 {
 		f.ZeroIterations = true
+		if it := res.Iterations; it != nil && it.Total > 0 {
+			f.Notes = append(f.Notes, fmt.Sprintf("the scenario ran %d iterations (%d failed) but no protocol call was recorded — check that it makes its calls, and that the safety rules allow their hosts", it.Total, it.Failed))
+			return f
+		}
 		f.Notes = append(f.Notes, "the run recorded zero iterations — check that the scenario's default export ran and that the target was reachable")
 		return f
 	}
@@ -58,6 +71,16 @@ func Analyze(res *report.Result) Findings {
 		f.Notes = append(f.Notes, fmt.Sprintf("%.1f%% of requests failed (%d of %d)", f.FailurePercent, res.Failed, res.Total))
 	} else {
 		f.Notes = append(f.Notes, "no failed requests")
+	}
+	if len(res.FailureReasons) > 0 {
+		parts := make([]string, len(res.FailureReasons))
+		for i, fr := range res.FailureReasons {
+			parts[i] = fmt.Sprintf("%d %s", fr.Count, fr.Reason)
+		}
+		f.Notes = append(f.Notes, "failed requests by reason: "+strings.Join(parts, ", "))
+	}
+	if it := res.Iterations; it != nil && it.Failed > 0 {
+		f.Notes = append(f.Notes, fmt.Sprintf("%d of %d iterations failed (%.1f%%) — an iteration fails on an error the scenario throws, which is not always a failed call, so the error rate above may not show it", it.Failed, it.Total, it.ErrorRate*100))
 	}
 
 	if res.Latency.P50 > 0 && res.Latency.P99 > res.Latency.P50*5 {

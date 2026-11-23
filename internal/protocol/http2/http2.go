@@ -124,7 +124,7 @@ func (d *Driver) Do(ctx context.Context) (protocol.Result, error) {
 	received, _ := io.Copy(io.Discard, resp.Body)
 
 	return protocol.Result{
-		Success:       resp.StatusCode >= 200 && resp.StatusCode < 400,
+		Success:       protocol.HTTPStatusOK(resp.StatusCode),
 		StatusCode:    resp.StatusCode,
 		BytesSent:     int64(len(d.target.Body)),
 		BytesReceived: received,

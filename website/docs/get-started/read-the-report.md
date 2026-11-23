@@ -31,7 +31,13 @@ thresholds
   thresholds breached
 ```
 
-`total` is the number of calls. `failed` is the number that returned an error. A threshold line shows the limit you set and the value VegaLoad saw.
+`total` is the number of calls. `failed` is the number that returned an error, or an HTTP status of 400 or higher. A threshold line shows the limit you set and the value VegaLoad saw.
+
+Some lines appear only when they apply:
+
+- `failures:` counts the failed calls by reason, such as `12 status 503, 3 timeout`.
+- `dropped:` counts the iterations `constant-arrival-rate` or `ramping-arrival-rate` could not start because every VU was busy. They never ran, so they are not in `total`, `failed` or the latency. When more than 1% of the planned iterations were dropped, a `WARNING:` line says so: the target got less load than you asked for. Raise `-max-vus`.
+- A scenario run adds an `iterations` block. In a scenario, each call is one request, and an iteration (one run of the whole scenario function) is counted on its own, with its own failures and duration.
 
 ## The exit code
 
@@ -47,7 +53,7 @@ A run with no threshold exits 0 even if every call failed. Always set a limit wh
 
 ## The HTML report
 
-The top shows the total, the failed count and the error rate. The sections follow in this order.
+The top shows the total, the failed count and the error rate, and the dropped iterations when there were any. A warning about dropped iterations follows, then a **Failures** table of the failed calls by reason. The other sections follow in this order.
 
 **Thresholds.** One row per limit, with PASS or FAIL, the limit and the observed value. The badge on top says "All thresholds passed" or "Thresholds breached".
 
@@ -59,7 +65,9 @@ The top shows the total, the failed count and the error rate. The sections follo
 
 **Protocols.** This appears when the run made calls over more than plain HTTP. Each protocol has its own calls, failures and latency. A threshold can target one: `-threshold 'p95{protocol="ftp"} < 500ms'`.
 
-**Latency.** The distribution of response times: min, p50, p90, p95, p99, max and mean. With steps, this row is for the whole iteration. The step table has the per-step numbers.
+**Latency.** The distribution of response times: min, p50, p90, p95, p99, max and mean, one sample per call. The step table has the per-step numbers.
+
+**Iterations.** This appears for a scenario run. It shows how many iterations ran and failed, and how long a whole iteration took.
 
 **Over time.** Two small charts, one point per second. One shows requests per second. One shows the error rate. A dip or a spike here tells you when something changed.
 
@@ -72,6 +80,10 @@ The top shows the total, the failed count and the error rate. The sections follo
 | `executor`, `started_at`, `elapsed_ns` | How the run was shaped, when it began, how long it ran |
 | `total`, `failed`, `error_rate` | The call counts. `error_rate` is a fraction, so 0.029 is 2.9% |
 | `latency` | `min_ns`, `mean_ns`, `max_ns`, `p50_ns`, `p90_ns`, `p95_ns`, `p99_ns` |
+| `failure_reasons` | The failed calls by reason: `reason` and `count` |
+| `iterations` | A scenario run's iterations: `total`, `failed`, `error_rate`, `duration` |
+| `dropped_iterations` | Arrivals that could not start because every VU was busy |
+| `warnings` | Plain sentences, such as too many dropped iterations |
 | `time_series` | One entry per second: `requests`, `failed`, `rps`, `error_rate` |
 | `thresholds` | One entry per limit: `name`, `metric`, `operator`, `value`, `observed`, `passed` |
 | `thresholds_passed` | `true` only if every limit passed. Absent if you set none. |

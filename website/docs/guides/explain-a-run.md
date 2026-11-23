@@ -14,9 +14,10 @@ vegaload run -target http://127.0.0.1:8080/widgets -protocol http1 \
 vegaload diagnose baseline.json
 ```
 
-`diagnose` reports the failure rate, flags a latency long tail (p99 more
-than 5x p50), and says whether failures were concentrated in one period or
-spread out — plus suggested pass/fail thresholds (a p95 ceiling, an error
+`diagnose` reports the failure rate and the failures by reason, flags a
+latency long tail (p99 more than 5x p50), says whether failures were
+concentrated in one period or spread out, and notes dropped iterations and
+failed iterations — plus suggested pass/fail thresholds (a p95 ceiling, an error
 rate ceiling) derived from that same run, for writing into a CI gate. Add a
 bring-your-own-LLM connector for a plain-English narrative on top of the
 rule-based findings:

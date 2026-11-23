@@ -112,6 +112,14 @@ type Result struct {
 	Refused bool
 }
 
+// HTTPStatusOK is the rule every HTTP call follows unless the call names
+// the statuses it expects: a 2xx or 3xx answer is a success, and 400 or
+// higher is a failure. The HTTP drivers and a scenario's http global both
+// use it, so the two modes judge the same answer the same way.
+func HTTPStatusOK(code int) bool {
+	return code >= 200 && code < 400
+}
+
 // Protocol is implemented by each wire protocol driver. The engine package
 // calls Do once per iteration and Close once the driver is no longer
 // needed; it holds no protocol-specific knowledge of its own.

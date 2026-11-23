@@ -59,6 +59,35 @@ fit your real flow. `sample-app.vegaload-plan.md` is a runbook with one
 ready-to-run `vegaload run` command per endpoint, for loading one endpoint at a
 time.
 
+## What a scenario run counts
+
+Each call a scenario makes is one request: an HTTP request, a query, a
+publish. `total`, `failed`, the error rate, the latency and the time series
+are those calls. An iteration is one run of the default function (or of
+`iteration()` in Python). Iterations are counted on their own, under
+`iterations` in the summary and the JSON: how many ran, how many failed, and
+how long a whole iteration took. A scenario that makes no calls, such as
+`smoke.vl.js`, has iterations and no requests.
+
+An HTTP call fails on a status of 400 or higher, the same rule as
+`-protocol http1`. The script still gets the answer, and the iteration goes
+on. To accept another status for one call, list the statuses it expects:
+
+```js
+const r = http.get(base + "/widgets/999", { expectedStatuses: [404] });
+```
+
+```python
+r = http.get(base + "/widgets/999", expected_statuses=[404])
+```
+
+The list replaces the default rule for that call, so `[200]` makes a 302 a
+failure too. `-timeout` is the time limit for each call.
+
+Each failed request has a reason: `timeout`, `status 503` (the status it
+got), `connection refused`, `connection reset`, `dns`, `tls` or `error`. The
+summary prints them as `failures:`, and the JSON has them as `failure_reasons`.
+
 ## Call other protocols from a scenario
 
 The full list, with options and examples, is in [Supported protocols](/guides).
