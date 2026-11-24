@@ -1,7 +1,6 @@
 package report
 
 import (
-	"sort"
 	"time"
 
 	"github.com/vegaload/vegaload/internal/secrets"
@@ -17,16 +16,16 @@ const otherCalls = "(other)"
 
 // callProto is one protocol's operations and phase measures.
 type callProto struct {
+	exact        bool
 	ops          map[string]*callOp
 	opOrder      []string
-	measures     map[string][]time.Duration
+	measures     map[string]*dist
 	measureOrder []string
 }
 
-// callOp is one operation. samples is packed like a step: duration in
-// nanoseconds shifted left by one, with the low bit set when the call failed.
+// callOp is one operation: its calls, and the bytes they moved.
 type callOp struct {
-	samples  []uint64
+	runStats
 	sent     int64
 	received int64
 }
@@ -41,11 +40,10 @@ func (c *Collector) RecordCall(protocol, op string, d time.Duration, err error, 
 	}
 	protocol = callName(protocol)
 	op = callName(op)
-	packed := packRun(d, err != nil)
 	c.callMu.Lock()
 	p := c.protoLocked(protocol)
 	o := p.opLocked(op)
-	o.samples = append(o.samples, packed)
+	o.add(d, err != nil)
 	o.sent += sent
 	o.received += received
 	c.callMu.Unlock()
@@ -66,17 +64,19 @@ func (c *Collector) RecordMeasure(protocol, name string, d time.Duration) {
 	defer c.callMu.Unlock()
 	p := c.protoLocked(protocol)
 	if p.measures == nil {
-		p.measures = map[string][]time.Duration{}
+		p.measures = map[string]*dist{}
 	}
-	samples, known := p.measures[name]
+	m, known := p.measures[name]
 	if !known && len(p.measures) >= maxCallNames {
 		name = otherCalls
-		samples, known = p.measures[name]
+		m, known = p.measures[name]
 	}
 	if !known {
+		m = newDist(p.exact)
+		p.measures[name] = m
 		p.measureOrder = append(p.measureOrder, name)
 	}
-	p.measures[name] = append(samples, d)
+	m.add(d)
 }
 
 // callName redacts a stored name. It stays out of line so the compiler does
@@ -108,7 +108,7 @@ func (c *Collector) protoLocked(name string) *callProto {
 		p, known = c.calls[name]
 	}
 	if !known {
-		p = &callProto{}
+		p = &callProto{exact: c.exact}
 		c.calls[name] = p
 		c.callOrder = append(c.callOrder, name)
 	}
@@ -130,68 +130,89 @@ func (p *callProto) opLocked(name string) *callOp {
 		o, known = p.ops[name]
 	}
 	if !known {
-		o = &callOp{}
+		o = &callOp{runStats: runStats{d: newDist(p.exact)}}
 		p.ops[name] = o
 		p.opOrder = append(p.opOrder, name)
 	}
 	return o
 }
 
+// opSnap is an operation or a measure copied under callMu, so its latency
+// can be worked out after the lock is released.
+type opSnap struct {
+	name           string
+	d              *dist
+	failed         int64
+	sent, received int64
+}
+
 // snapshotProtocols builds the protocol breakdown. An empty recording is
 // nil, so omitempty drops the JSON key.
 func (c *Collector) snapshotProtocols(elapsed time.Duration) []ProtocolResult {
-	c.callMu.Lock()
-	defer c.callMu.Unlock()
-	if len(c.callOrder) == 0 {
-		return nil
+	type protoSnap struct {
+		name     string
+		ops      []opSnap
+		measures []opSnap
 	}
-	secs := elapsed.Seconds()
-	out := make([]ProtocolResult, 0, len(c.callOrder))
+	c.callMu.Lock()
+	snaps := make([]protoSnap, 0, len(c.callOrder))
 	for _, name := range c.callOrder {
 		p := c.calls[name]
-		merged := make([]uint64, 0)
-		var sent, received int64
-		ops := make([]OperationResult, 0, len(p.opOrder))
+		ps := protoSnap{name: name}
 		for _, on := range p.opOrder {
 			o := p.ops[on]
-			merged = append(merged, o.samples...)
+			ps.ops = append(ps.ops, opSnap{name: on, d: o.d.snapshot(), failed: o.failed, sent: o.sent, received: o.received})
+		}
+		for _, mn := range p.measureOrder {
+			ps.measures = append(ps.measures, opSnap{name: mn, d: p.measures[mn].snapshot()})
+		}
+		snaps = append(snaps, ps)
+	}
+	c.callMu.Unlock()
+	if len(snaps) == 0 {
+		return nil
+	}
+
+	secs := elapsed.Seconds()
+	out := make([]ProtocolResult, 0, len(snaps))
+	for _, ps := range snaps {
+		all := newDist(c.exact)
+		var failed, sent, received int64
+		ops := make([]OperationResult, 0, len(ps.ops))
+		for _, o := range ps.ops {
+			all.merge(o.d)
+			failed += o.failed
 			sent += o.sent
 			received += o.received
-			total, failed, lat := unpackCalls(o.samples)
+			total := o.d.h.Count()
 			ops = append(ops, OperationResult{
-				Name:          on,
+				Name:          o.name,
 				Total:         total,
-				Failed:        failed,
-				ErrorRate:     rateOf(failed, total),
-				Latency:       lat,
+				Failed:        o.failed,
+				ErrorRate:     rateOf(o.failed, total),
+				Latency:       o.d.latency(),
 				BytesSent:     o.sent,
 				BytesReceived: o.received,
 			})
 		}
-		total, failed, lat := unpackCalls(merged)
-		bps := 0.0
-		if secs > 0 {
-			bps = float64(sent+received) / secs
-		}
 		var measures []MeasureResult
-		for _, mn := range p.measureOrder {
-			samples := append([]time.Duration(nil), p.measures[mn]...)
-			sort.Slice(samples, func(i, j int) bool { return samples[i] < samples[j] })
+		for _, m := range ps.measures {
 			measures = append(measures, MeasureResult{
-				Name:    mn,
-				Count:   int64(len(samples)),
-				Latency: latencyOf(samples),
+				Name:    m.name,
+				Count:   m.d.h.Count(),
+				Latency: m.d.latency(),
 			})
 		}
+		total := all.h.Count()
 		out = append(out, ProtocolResult{
-			Name:          name,
+			Name:          ps.name,
 			Total:         total,
 			Failed:        failed,
 			ErrorRate:     rateOf(failed, total),
-			Latency:       lat,
+			Latency:       all.latency(),
 			BytesSent:     sent,
 			BytesReceived: received,
-			BytesPerSec:   bps,
+			BytesPerSec:   bytesPerSec(sent+received, secs),
 			Operations:    ops,
 			Measures:      measures,
 		})
@@ -199,57 +220,16 @@ func (c *Collector) snapshotProtocols(elapsed time.Duration) []ProtocolResult {
 	return out
 }
 
+func bytesPerSec(bytes int64, secs float64) float64 {
+	if secs <= 0 {
+		return 0
+	}
+	return float64(bytes) / secs
+}
+
 func rateOf(failed, total int64) float64 {
 	if total == 0 {
 		return 0
 	}
 	return float64(failed) / float64(total)
-}
-
-func unpackCalls(packed []uint64) (total, failed int64, lat Latency) {
-	durs := make([]time.Duration, len(packed))
-	for i, v := range packed {
-		durs[i] = time.Duration(v >> 1)
-		if v&1 == 1 {
-			failed++
-		}
-	}
-	sort.Slice(durs, func(i, j int) bool { return durs[i] < durs[j] })
-	return int64(len(durs)), failed, latencyOf(durs)
-}
-
-func latencyOf(sorted []time.Duration) Latency {
-	if len(sorted) == 0 {
-		return Latency{}
-	}
-	var sum time.Duration
-	for _, d := range sorted {
-		sum += d
-	}
-	return Latency{
-		Min:  sorted[0],
-		Max:  sorted[len(sorted)-1],
-		Mean: sum / time.Duration(len(sorted)),
-		P50:  percentile(sorted, 50),
-		P90:  percentile(sorted, 90),
-		P95:  percentile(sorted, 95),
-		P99:  percentile(sorted, 99),
-	}
-}
-
-// callSampleBytes is the packed call samples currently retained, in bytes.
-// It counts length, not slice capacity.
-func (c *Collector) callSampleBytes() int {
-	c.callMu.Lock()
-	defer c.callMu.Unlock()
-	n := 0
-	for _, p := range c.calls {
-		for _, o := range p.ops {
-			n += len(o.samples) * 8
-		}
-		for _, m := range p.measures {
-			n += len(m) * 8
-		}
-	}
-	return n
 }

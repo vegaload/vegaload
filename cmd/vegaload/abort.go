@@ -86,9 +86,10 @@ func (w *breachWatcher) watch(stop <-chan struct{}, cancel context.CancelFunc) *
 		}
 		began := time.Now()
 		elapsed := began.Sub(w.start)
-		// Finish copies and sorts every sample, so on a big run it takes
-		// a while. Look less often then, to keep the cost near a tenth
-		// of the run's own.
+		// Finish copies histograms, which is cheap, but with
+		// -exact-percentiles it copies and sorts every sample, so on a
+		// big run it takes a while. Look less often then, to keep the
+		// cost near a tenth of the run's own.
 		res := w.collector.Finish(w.executor, elapsed)
 		for i, t := range w.thresholds {
 			observed, breached := t.LiveBreach(res)

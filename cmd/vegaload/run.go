@@ -138,6 +138,10 @@ type runConfig struct {
 
 	OutPath string
 
+	// ExactPercentiles keeps every latency for exact percentiles, instead
+	// of estimating them from histograms.
+	ExactPercentiles bool
+
 	// FR-CLI-06: target allowlist and hard caps.
 	AllowTargets []string
 	Yes          bool // skip the confirmation prompt for a non-allowlisted target
@@ -230,6 +234,7 @@ func parseRunArgs(args []string) (*runConfig, error) {
 	fs.DurationVar(&cfg.Timeout, "timeout", 30*time.Second, "time limit for each request: each -protocol call, or each call a scenario makes. A request that runs out of time fails with the reason \"timeout\"")
 	fs.BoolVar(&cfg.NoConnectionReuse, "no-connection-reuse", false, "open a new connection for every HTTP request, in a scenario and in -protocol http1 or http2, instead of keeping connections open between requests. Use it to measure connection setup on purpose")
 	fs.StringVar(&cfg.OutPath, "out", "", "also write a JSON summary to this path")
+	fs.BoolVar(&cfg.ExactPercentiles, "exact-percentiles", false, "keep every sample to compute exact percentiles, instead of estimating them within 2.5% from histograms. Memory grows with the number of requests: use it for small local runs")
 	fs.Var(headers, "header", "request header \"Key: Value\" (repeatable)")
 	fs.Var(options, "opt", "driver option key=value, e.g. -opt read=64 (repeatable; each protocol lists its own keys)")
 
@@ -764,7 +769,12 @@ func scriptedIteration(cfg *runConfig, concurrency int) (engine.IterationFunc, f
 // caller needs to observe progress while the run is still in flight
 // (cmdRun's -output jsonl mode does this — see streamProgress below).
 func runScenario(cfg *runConfig) (*report.Result, error) {
-	return runScenarioWithCollector(cfg, report.NewCollector())
+	return runScenarioWithCollector(cfg, newCollector(cfg))
+}
+
+// newCollector is the collector a run records into.
+func newCollector(cfg *runConfig) *report.Collector {
+	return report.NewCollectorWith(report.Options{Exact: cfg.ExactPercentiles})
 }
 
 func runScenarioWithCollector(cfg *runConfig, collector *report.Collector) (*report.Result, error) {
@@ -1094,7 +1104,7 @@ func runJSONL(cfg *runConfig, w io.Writer) (*report.Result, error) {
 		_ = enc.Encode(map[string]any{"type": typ, "data": data})
 	}
 
-	collector := report.NewCollector()
+	collector := newCollector(cfg)
 	emit("run_started", map[string]any{
 		"executor": cfg.Executor, "vus": cfg.VUs, "duration_ns": plannedDuration(cfg),
 		"scenario_path": cfg.ScenarioPath, "target": cfg.Target.URL,

@@ -37,6 +37,8 @@ func run(args []string) int {
 		return cmdDiagnose(args[1:])
 	case "compare":
 		return cmdCompare(args[1:])
+	case "merge":
+		return cmdMerge(args[1:])
 	case "mcp":
 		return cmdMCP(args[1:])
 	case "init":
@@ -75,6 +77,7 @@ Commands:
   new        Scaffold a starter scenario file
   diagnose   Print environment info, or explain a report's results
   compare    Diff a candidate JSON report against a baseline
+  merge      Combine JSON reports from several machines into one report
   mcp serve  Run an MCP server over stdio for agent-native use (Claude Code, Cursor, ...)
   mcp eval   Run the versioned MCP tool-calling eval suite against this binary
   init       Register the MCP server and skill bundles for this project
@@ -103,6 +106,7 @@ VEGALOAD_CONFIG_DIR (where the live view keeps this machine's project).
 
 Run "vegaload run -h" for the run command's flags.
 Run "vegaload compare -h" for baseline-vs-candidate flags.
+Run "vegaload merge -h" for combining reports from several machines.
 Run "vegaload mcp serve -h" for the MCP server's tools.
 Run "vegaload mcp eval -output json" for machine-readable eval results ("-suite v2" for the newer suite).
 Run "vegaload init -h" for what init writes.

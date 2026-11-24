@@ -70,6 +70,7 @@ const sidebars = {
         'guides/import-har',
         'guides/thresholds',
         'guides/compare-runs',
+        'guides/merge-results',
         'guides/explain-a-run',
       ],
     },

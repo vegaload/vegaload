@@ -17,6 +17,7 @@ A released binary does not include the examples folder.
 - [Start from a browser recording](/guides/import-har). Record a real session in your browser (the network tab can save it as a HAR file), then turn it into a scenario:
 - [Thresholds](/guides/thresholds). Add `-threshold` to make a run pass or fail on its own numbers, for example in CI:
 - [Compare runs](/guides/compare-runs). After another run with `-out candidate.json`:
+- [Merge results](/guides/merge-results). Combine the JSON reports of runs that sent load at the same time from several machines into one report.
 - [Explain a run](/guides/explain-a-run). Keep a run's JSON summary alongside its HTML report with `-out`:
 
 <!-- vegaload:protocols -->

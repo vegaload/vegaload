@@ -16,44 +16,51 @@ import (
 
 	"github.com/vegaload/vegaload/internal/engine"
 	"github.com/vegaload/vegaload/internal/failure"
+	"github.com/vegaload/vegaload/internal/hist"
 	"github.com/vegaload/vegaload/internal/secrets"
 )
 
-// sample is the minimal per-request record Collector keeps. Keeping
-// only what percentile and time-bucket computation need (not the full
-// engine.IterationResult) keeps memory bounded even at NFR-03's
-// 1,000,000-request scale: roughly 32 bytes/sample, ~32MB at that size.
-type sample struct {
-	offset time.Duration // time since the run started
-	dur    time.Duration
-	failed bool
+// Options changes how a Collector keeps a run's latencies.
+type Options struct {
+	// Exact keeps every latency, so the percentiles are exact instead of
+	// estimated from a histogram (within hist.MaxError above 0.5 ms).
+	// Memory then grows with the number of requests: it is for small
+	// local runs. The result carries the histograms either way.
+	Exact bool
 }
 
-// Collector implements engine.Recorder, accumulating every request of a
-// run so Finish can compute the percentiles and time-bucketed series a
-// Result needs. A request is one iteration, or, for a run that called
-// RequestsFromCalls, one protocol call. It is safe for concurrent use —
-// Run calls Record from every VU goroutine at once.
+// Collector implements engine.Recorder. Every latency of a run (requests,
+// iterations, steps, protocol calls and measures) goes into a histogram,
+// and every count into a counter, so the memory a run needs does not grow
+// with the number of requests. A request is one iteration, or, for a run
+// that called RequestsFromCalls, one protocol call. It is safe for
+// concurrent use — Run calls Record from every VU goroutine at once.
 type Collector struct {
-	mu      sync.Mutex
-	start   time.Time
-	samples []sample
-	// reasons counts the failed requests in samples by failure.Reason. It
-	// is guarded by mu, so the two always agree.
+	exact bool // set once, by NewCollectorWith
+
+	mu    sync.Mutex
+	start time.Time
+	reqs  *dist
+	// secs counts the requests that started in each one-second bucket: the
+	// final time series. Its last index is the last second a request
+	// started in, which lets a live view know which buckets are left at
+	// the end (see LiveBuckets).
+	secs []bucketAccum
+	// reasons counts the failed requests by failure.Reason.
 	reasons map[string]int64
-	// maxBucket is the highest one-second bucket any sample started in, or
-	// -1 before the first sample. It is the last index Finish's time series
-	// has, which lets a live view know which buckets are left at the end
-	// without scanning every sample (see LiveBuckets).
-	maxBucket int64
+	// liveHists is the latency of each second a live cursor has not handed
+	// out yet. It is kept only while a cursor exists (tracking), from the
+	// cursor's next second (liveNext) on, and a second's histogram is
+	// dropped when the cursor hands the second out.
+	liveHists map[int64]*hist.Histogram
+	liveNext  int64
 
 	// callsAreRequests is set by RequestsFromCalls. Each recorded call is
 	// then a request, and each iteration goes to iterations instead.
 	callsAreRequests atomic.Bool
-	// iterations holds every iteration of such a run, guarded by iterMu
-	// and packed like a step.
+	// iterations holds the iterations of such a run, guarded by iterMu.
 	iterMu     sync.Mutex
-	iterations []uint64
+	iterations *runStats
 	// ran counts the iterations that ran, in either mode, and dropped the
 	// arrivals that found every VU busy. Their sum is the planned load.
 	ran     atomic.Int64
@@ -61,11 +68,12 @@ type Collector struct {
 
 	// tracking is set once a live cursor exists. Only then are the starts of
 	// running iterations kept (inflight, guarded by mu, counts them by the
-	// bucket they started in), so a run with no live view pays nothing for it.
+	// bucket they started in) and the per-second histograms, so a run with
+	// no live view pays nothing for it.
 	tracking atomic.Bool
 	inflight map[int64]int
 
-	// liveTotal/liveFailed mirror the counts in samples but are safe to
+	// liveTotal/liveFailed mirror the request counts but are safe to
 	// read cheaply (no lock, no copy) while a run is still in progress —
 	// cmd/vegaload's -output jsonl mode polls these for periodic
 	// "progress" events (see run.go) without contending with Record on
@@ -80,27 +88,45 @@ type Collector struct {
 	checkOrder []string
 	checks     map[string]*CheckResult
 
-	// steps holds every run of each named step (FR-CLI-18), guarded by
-	// stepMu for the same reason as checks. Each run is packed in one
-	// uint64 (duration in nanoseconds shifted left by one, with the lowest
-	// bit set when the step failed), so a million iterations of three
-	// steps stay near 24 MB.
+	// steps holds each named step's runs (FR-CLI-18), guarded by stepMu
+	// for the same reason as checks.
 	stepMu    sync.Mutex
 	stepOrder []string
-	steps     map[string][]uint64
+	steps     map[string]*runStats
 
-	// calls holds every recorded protocol call, guarded by callMu. Each
-	// call is packed the same way as a step. Byte counts are summed, not
-	// stored per call. Measures are phase times and are not calls.
+	// calls holds every recorded protocol call, guarded by callMu. Byte
+	// counts are summed. Measures are phase times and are not calls.
 	callMu    sync.Mutex
 	callOrder []string
 	calls     map[string]*callProto
 }
 
+// runStats is the runs of one thing (an iteration, a step) and how many
+// of them failed.
+type runStats struct {
+	d      *dist
+	failed int64
+}
+
+func (r *runStats) add(d time.Duration, failed bool) {
+	r.d.add(d)
+	if failed {
+		r.failed++
+	}
+}
+
 // NewCollector returns a Collector ready to record a run that is
-// starting now.
-func NewCollector() *Collector {
-	return &Collector{start: time.Now(), maxBucket: -1}
+// starting now, with latencies kept in histograms.
+func NewCollector() *Collector { return NewCollectorWith(Options{}) }
+
+// NewCollectorWith is NewCollector with options.
+func NewCollectorWith(o Options) *Collector {
+	return &Collector{
+		exact:      o.Exact,
+		start:      time.Now(),
+		reqs:       newDist(o.Exact),
+		iterations: &runStats{d: newDist(o.Exact)},
+	}
 }
 
 // Start is the instant the run's clock started. Every offset in the series
@@ -165,7 +191,7 @@ func (c *Collector) liveState(idx int64) (running bool, last int64) {
 			break
 		}
 	}
-	return running, c.maxBucket
+	return running, int64(len(c.secs)) - 1
 }
 
 // Record implements engine.Recorder. A dropped arrival is only counted: it
@@ -177,9 +203,8 @@ func (c *Collector) Record(r engine.IterationResult) {
 	}
 	c.ran.Add(1)
 	if c.callsAreRequests.Load() {
-		packed := packRun(r.Duration, r.Err != nil)
 		c.iterMu.Lock()
-		c.iterations = append(c.iterations, packed)
+		c.iterations.add(r.Duration, r.Err != nil)
 		c.iterMu.Unlock()
 		return
 	}
@@ -189,42 +214,43 @@ func (c *Collector) Record(r engine.IterationResult) {
 // addRequest records one request that started at start, took d, and failed
 // with err (nil when it worked).
 func (c *Collector) addRequest(start time.Time, d time.Duration, err error) {
-	s := sample{
-		offset: max(start.Sub(c.start), 0),
-		dur:    d,
-		failed: err != nil,
+	idx := int64(max(start.Sub(c.start), 0) / bucketWidth)
+	failed := err != nil
+	var reason string
+	if failed {
+		reason = failure.Reason(err)
 	}
-	reason := failure.Reason(err)
 	c.mu.Lock()
-	c.samples = append(c.samples, s)
-	if idx := int64(s.offset / bucketWidth); idx > c.maxBucket {
-		c.maxBucket = idx
+	c.reqs.add(d)
+	if n := int64(len(c.secs)); idx >= n {
+		c.secs = append(c.secs, make([]bucketAccum, idx+1-n)...)
 	}
-	if s.failed {
+	b := &c.secs[idx]
+	b.count++
+	if failed {
+		b.failed++
 		if c.reasons == nil {
 			c.reasons = map[string]int64{}
 		}
 		c.reasons[reason]++
 	}
+	if idx >= c.liveNext && c.tracking.Load() {
+		h := c.liveHists[idx]
+		if h == nil {
+			if c.liveHists == nil {
+				c.liveHists = map[int64]*hist.Histogram{}
+			}
+			h = hist.New()
+			c.liveHists[idx] = h
+		}
+		h.Add(d)
+	}
 	c.mu.Unlock()
 
 	c.liveTotal.Add(1)
-	if s.failed {
+	if failed {
 		c.liveFailed.Add(1)
 	}
-}
-
-// packRun packs a duration and a failed flag into one uint64: the duration
-// in nanoseconds shifted left by one, with the lowest bit set on failure.
-func packRun(d time.Duration, failed bool) uint64 {
-	if d < 0 {
-		d = 0
-	}
-	packed := uint64(d) << 1
-	if failed {
-		packed |= 1
-	}
-	return packed
 }
 
 // MaxCheckNames bounds how many distinct check names a run keeps. Further
@@ -278,23 +304,24 @@ func (c *Collector) RecordStep(name string, d time.Duration, failed bool) {
 	// A step name is text the script chose, so it may carry a secret the
 	// script read (FR-CLI-17).
 	name = secrets.Redact(name)
-	packed := packRun(d, failed)
 	c.stepMu.Lock()
 	defer c.stepMu.Unlock()
 	if c.steps == nil {
-		c.steps = map[string][]uint64{}
+		c.steps = map[string]*runStats{}
 	}
-	runs, known := c.steps[name]
+	st, known := c.steps[name]
 	if !known && len(c.steps) >= MaxStepNames {
 		// A name built from an id would grow this map with every
 		// iteration. Past the cap, new names share one bucket.
 		name = OtherStepsName
-		runs, known = c.steps[name]
+		st, known = c.steps[name]
 	}
 	if !known {
+		st = &runStats{d: newDist(c.exact)}
+		c.steps[name] = st
 		c.stepOrder = append(c.stepOrder, name)
 	}
-	c.steps[name] = append(runs, packed)
+	st.add(d, failed)
 }
 
 // snapshotSteps computes each step's totals and latency, in first-seen
@@ -302,42 +329,26 @@ func (c *Collector) RecordStep(name string, d time.Duration, failed bool) {
 func (c *Collector) snapshotSteps() []StepResult {
 	c.stepMu.Lock()
 	order := append([]string(nil), c.stepOrder...)
-	runs := make(map[string][]uint64, len(order))
-	for _, n := range order {
-		runs[n] = append([]uint64(nil), c.steps[n]...)
+	snaps := make([]runStats, len(order))
+	for i, n := range order {
+		st := c.steps[n]
+		snaps[i] = runStats{d: st.d.snapshot(), failed: st.failed}
 	}
 	c.stepMu.Unlock()
 	if len(order) == 0 {
 		return nil
 	}
 	out := make([]StepResult, 0, len(order))
-	for _, n := range order {
-		packed := runs[n]
-		durations := make([]time.Duration, len(packed))
-		var sum time.Duration
-		var failed int64
-		for i, p := range packed {
-			durations[i] = time.Duration(p >> 1)
-			sum += durations[i]
-			if p&1 == 1 {
-				failed++
-			}
-		}
-		sort.Slice(durations, func(i, j int) bool { return durations[i] < durations[j] })
-		sr := StepResult{Name: n, Total: int64(len(durations)), Failed: failed}
-		if len(durations) > 0 {
-			sr.ErrorRate = float64(failed) / float64(len(durations))
-			sr.Latency = Latency{
-				Min:  durations[0],
-				Max:  durations[len(durations)-1],
-				Mean: sum / time.Duration(len(durations)),
-				P50:  percentile(durations, 50),
-				P90:  percentile(durations, 90),
-				P95:  percentile(durations, 95),
-				P99:  percentile(durations, 99),
-			}
-		}
-		out = append(out, sr)
+	for i, n := range order {
+		s := snaps[i]
+		total := s.d.h.Count()
+		out = append(out, StepResult{
+			Name:      n,
+			Total:     total,
+			Failed:    s.failed,
+			ErrorRate: rateOf(s.failed, total),
+			Latency:   s.d.latency(),
+		})
 	}
 	return out
 }
@@ -369,22 +380,25 @@ func (c *Collector) Counts() (total, failed int64) {
 // series itself becoming the thing that makes the report large.
 const bucketWidth = time.Second
 
-// Finish computes a Result from every sample recorded so far. Call it
-// once, after the executor has returned; executor identifies the load
-// shape (ex.Name()) and elapsed is the run's measured wall-clock time,
-// both of which the caller already has from runScenario.
+// Finish computes a Result from everything recorded so far. executor
+// identifies the load shape (ex.Name()) and elapsed is the run's measured
+// wall-clock time, both of which the caller already has from runScenario.
+// It copies histograms and counters, not requests, so it stays cheap
+// enough for the abort watcher to call while the run goes on (in exact
+// mode it copies and sorts every latency).
 func (c *Collector) Finish(executor string, elapsed time.Duration) *Result {
 	c.mu.Lock()
-	samples := make([]sample, len(c.samples))
-	copy(samples, c.samples)
+	reqs := c.reqs.snapshot()
+	secs := append([]bucketAccum(nil), c.secs...)
 	reasons := sortedReasons(c.reasons)
 	c.mu.Unlock()
 
 	res := &Result{
+		Schema:            Schema,
 		Executor:          executor,
 		StartedAt:         c.start,
 		Elapsed:           elapsed,
-		Total:             int64(len(samples)),
+		Total:             reqs.h.Count(),
 		DroppedIterations: c.dropped.Load(),
 		FailureReasons:    reasons,
 		Iterations:        c.snapshotIterations(),
@@ -395,49 +409,15 @@ func (c *Collector) Finish(executor string, elapsed time.Duration) *Result {
 	if w := dropWarning(c.ran.Load(), res.DroppedIterations); w != "" {
 		res.Warnings = append(res.Warnings, w)
 	}
-	if len(samples) == 0 {
+	if res.Total == 0 {
 		return res
 	}
-
-	durations := make([]time.Duration, len(samples))
-	var sum time.Duration
-	var failed int64
-	buckets := map[int64]*bucketAccum{}
-
-	for i, s := range samples {
-		durations[i] = s.dur
-		sum += s.dur
-		if s.failed {
-			failed++
-		}
-		idx := int64(s.offset / bucketWidth)
-		b := buckets[idx]
-		if b == nil {
-			b = &bucketAccum{}
-			buckets[idx] = b
-		}
-		b.count++
-		if s.failed {
-			b.failed++
-		}
+	for _, b := range secs {
+		res.Failed += b.failed
 	}
-
-	sort.Slice(durations, func(i, j int) bool { return durations[i] < durations[j] })
-
-	res.Failed = failed
-	res.Latency = Latency{
-		Min:  durations[0],
-		Max:  durations[len(durations)-1],
-		Mean: sum / time.Duration(len(durations)),
-		P50:  percentile(durations, 50),
-		P90:  percentile(durations, 90),
-		P95:  percentile(durations, 95),
-		P99:  percentile(durations, 99),
-	}
-	if res.Total > 0 {
-		res.ErrorRate = float64(failed) / float64(res.Total)
-	}
-	res.TimeSeries = buildSeries(buckets)
+	res.ErrorRate = rateOf(res.Failed, res.Total)
+	res.Latency = reqs.latency()
+	res.TimeSeries = buildSeries(secs)
 	return res
 }
 
@@ -492,10 +472,10 @@ func (c *Collector) snapshotIterations() *IterationStats {
 		return nil
 	}
 	c.iterMu.Lock()
-	packed := append([]uint64(nil), c.iterations...)
+	d, failed := c.iterations.d.snapshot(), c.iterations.failed
 	c.iterMu.Unlock()
-	total, failed, lat := unpackCalls(packed)
-	return &IterationStats{Total: total, Failed: failed, ErrorRate: rateOf(failed, total), Duration: lat}
+	total := d.h.Count()
+	return &IterationStats{Total: total, Failed: failed, ErrorRate: rateOf(failed, total), Duration: d.latency()}
 }
 
 type bucketAccum struct {
@@ -503,45 +483,22 @@ type bucketAccum struct {
 	failed int64
 }
 
-// percentile returns the p-th percentile (0-100) of sorted, a slice
-// already sorted ascending. It uses the nearest-rank method — simple,
-// and exact enough for a load-testing report; no interpolation.
-func percentile(sorted []time.Duration, p int) time.Duration {
-	if len(sorted) == 0 {
-		return 0
-	}
-	rank := (p * len(sorted)) / 100
-	if rank >= len(sorted) {
-		rank = len(sorted) - 1
-	}
-	return sorted[rank]
-}
-
-// buildSeries turns the bucket map into a dense, time-ordered slice —
-// dense so a chart renderer never has to guess whether a missing index
-// means "no bucket" or "zero requests that second".
-func buildSeries(buckets map[int64]*bucketAccum) []Point {
-	if len(buckets) == 0 {
+// buildSeries turns the per-second counts into a dense, time-ordered
+// slice — dense so a chart renderer never has to guess whether a missing
+// index means "no bucket" or "zero requests that second".
+func buildSeries(secs []bucketAccum) []Point {
+	if len(secs) == 0 {
 		return nil
 	}
-	var maxIdx int64
-	for idx := range buckets {
-		if idx > maxIdx {
-			maxIdx = idx
+	series := make([]Point, len(secs))
+	for idx, b := range secs {
+		series[idx] = Point{
+			Offset:    time.Duration(idx) * bucketWidth,
+			Requests:  b.count,
+			Failed:    b.failed,
+			RPS:       float64(b.count) / bucketWidth.Seconds(),
+			ErrorRate: rateOf(b.failed, b.count),
 		}
-	}
-	series := make([]Point, maxIdx+1)
-	for idx := int64(0); idx <= maxIdx; idx++ {
-		p := Point{Offset: time.Duration(idx) * bucketWidth}
-		if b, ok := buckets[idx]; ok {
-			p.Requests = b.count
-			p.Failed = b.failed
-			p.RPS = float64(b.count) / bucketWidth.Seconds()
-			if b.count > 0 {
-				p.ErrorRate = float64(b.failed) / float64(b.count)
-			}
-		}
-		series[idx] = p
 	}
 	return series
 }

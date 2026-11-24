@@ -66,7 +66,7 @@ The top shows the total, the failed count and the error rate, and the dropped it
 
 **Protocols.** This appears when the run made calls over more than plain HTTP. Each protocol has its own calls, failures and latency. A threshold can target one: `-threshold 'p95{protocol="ftp"} < 500ms'`.
 
-**Latency.** The distribution of response times: min, p50, p90, p95, p99, max and mean, one sample per call. The step table has the per-step numbers.
+**Latency.** The distribution of response times: min, p50, p90, p95, p99, max and mean, one sample per call. The step table has the per-step numbers. Min, max and mean are exact. The percentiles come from a histogram, so memory stays flat on a long run. They are within 2.5% of the exact value for calls slower than 0.5 ms. `vegaload run -exact-percentiles` keeps every sample for exact percentiles, for small local runs.
 
 **Iterations.** This appears for a scenario run. It shows how many iterations ran and failed, and how long a whole iteration took.
 
@@ -80,7 +80,7 @@ The top shows the total, the failed count and the error rate, and the dropped it
 | --- | --- |
 | `executor`, `started_at`, `elapsed_ns` | How the run was shaped, when it began, how long it ran |
 | `total`, `failed`, `error_rate` | The call counts. `error_rate` is a fraction, so 0.029 is 2.9% |
-| `latency` | `min_ns`, `mean_ns`, `max_ns`, `p50_ns`, `p90_ns`, `p95_ns`, `p99_ns` |
+| `latency` | `min_ns`, `mean_ns`, `max_ns`, `p50_ns`, `p90_ns`, `p95_ns`, `p99_ns`, and the `histogram` they come from |
 | `failure_reasons` | The failed calls by reason: `reason` and `count` |
 | `iterations` | A scenario run's iterations: `total`, `failed`, `error_rate`, `duration` |
 | `dropped_iterations` | Arrivals that could not start because every VU was busy |

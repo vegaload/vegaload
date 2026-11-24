@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"time"
+
+	"github.com/vegaload/vegaload/internal/hist"
 )
 
 // Result is a run's structured outcome: everything the HTML report
@@ -17,6 +19,15 @@ import (
 // one protocol call the scenario made (an HTTP request, a query, a
 // publish), and the iterations are counted on their own in Iterations.
 type Result struct {
+	// Schema names the shape of this JSON. It is Schema for a report
+	// whose latencies carry histograms, and empty in reports written
+	// before they did.
+	Schema string `json:"schema,omitempty"`
+
+	// MergedFrom is how many reports `vegaload merge` combined into this
+	// one. It is omitted for a single run.
+	MergedFrom int `json:"merged_from,omitempty"`
+
 	Executor  string        `json:"executor"`
 	StartedAt time.Time     `json:"started_at"`
 	Elapsed   time.Duration `json:"elapsed_ns"`
@@ -334,15 +345,23 @@ type BaselineMetric struct {
 	Regressed bool    `json:"regressed"`
 }
 
+// Schema is the value of Result.Schema in a report this version writes.
+const Schema = "vegaload.io/report/v2"
+
 // Latency holds the percentiles and summary stats FR-RPT-01 asks for.
+// Min, Max and Mean are exact. The percentiles are estimated from
+// Histogram (within hist.MaxError above 0.5 ms), or exact in a run with
+// Options.Exact. Histogram is what `vegaload merge` adds up; it is nil in
+// a report written before histograms existed, and for no values.
 type Latency struct {
-	Min  time.Duration `json:"min_ns"`
-	Mean time.Duration `json:"mean_ns"`
-	Max  time.Duration `json:"max_ns"`
-	P50  time.Duration `json:"p50_ns"`
-	P90  time.Duration `json:"p90_ns"`
-	P95  time.Duration `json:"p95_ns"`
-	P99  time.Duration `json:"p99_ns"`
+	Min       time.Duration   `json:"min_ns"`
+	Mean      time.Duration   `json:"mean_ns"`
+	Max       time.Duration   `json:"max_ns"`
+	P50       time.Duration   `json:"p50_ns"`
+	P90       time.Duration   `json:"p90_ns"`
+	P95       time.Duration   `json:"p95_ns"`
+	P99       time.Duration   `json:"p99_ns"`
+	Histogram *hist.Histogram `json:"histogram,omitempty"`
 }
 
 // Point is one bucket of Result.TimeSeries.
