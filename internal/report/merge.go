@@ -79,7 +79,9 @@ func Merge(rs []*Result) (*Result, error) {
 	out := &Result{Schema: Schema, StartedAt: start, Elapsed: end.Sub(start)}
 
 	reqs := hist.New()
+	ttfb := hist.New()
 	reasons := map[string]int64{}
+	var errs errorKinds
 	var series []bucketAccum
 	var iterations *mergedRuns
 	steps := newOrdered[*mergedRuns]()
@@ -98,6 +100,17 @@ func Merge(rs []*Result) (*Result, error) {
 		for _, fr := range r.FailureReasons {
 			reasons[fr.Reason] += fr.Count
 		}
+		errs.merge(r.Errors)
+		out.BytesSent += r.BytesSent
+		out.BytesReceived += r.BytesReceived
+		if r.TTFB != nil {
+			ttfb.Merge(r.TTFB.Histogram)
+		}
+		// Each report is its own machine, so their VUs add up.
+		out.VUsPeak += r.VUsPeak
+		out.VUsMax += r.VUsMax
+		out.IterationsStarted += r.IterationsStarted
+		out.IterationsCompleted += r.IterationsCompleted
 		out.DroppedIterations += r.DroppedIterations
 		for _, w := range r.Warnings {
 			warnings = appendNew(warnings, w)
@@ -147,6 +160,7 @@ func Merge(rs []*Result) (*Result, error) {
 				mo.add(o.Total, o.Failed, o.Latency)
 				mo.sent += o.BytesSent
 				mo.received += o.BytesReceived
+				mo.errs.merge(o.Errors)
 			}
 			for _, m := range p.Measures {
 				mp.measures.get(m.Name, newMergedRuns).add(m.Count, 0, m.Latency)
@@ -158,6 +172,11 @@ func Merge(rs []*Result) (*Result, error) {
 	out.ErrorRate = rateOf(out.Failed, out.Total)
 	out.Latency = latencyOf(reqs)
 	out.FailureReasons = sortedReasons(reasons)
+	out.Errors = errs.list()
+	if ttfb.Count() > 0 {
+		l := latencyOf(ttfb)
+		out.TTFB = &l
+	}
 	out.TimeSeries = buildSeries(series)
 	if aborted > 0 {
 		warnings = append(warnings, fmt.Sprintf("%d of the %d merged reports were stopped early by -abort-on-breach, so they cover less load than planned.", aborted, len(rs)))
@@ -187,6 +206,7 @@ func Merge(rs []*Result) (*Result, error) {
 			pr.Operations = append(pr.Operations, withEndpoint(name, OperationResult{
 				Name: on, Total: o.total, Failed: o.failed, ErrorRate: rateOf(o.failed, o.total),
 				Latency: latencyOf(o.h), BytesSent: o.sent, BytesReceived: o.received,
+				Errors: o.errs.list(),
 			}))
 		}
 		for _, mn := range mp.measures.order {
@@ -203,6 +223,7 @@ type mergedRuns struct {
 	total, failed  int64
 	sent, received int64
 	h              *hist.Histogram
+	errs           errorKinds
 }
 
 func newMergedRuns() *mergedRuns { return &mergedRuns{h: hist.New()} }

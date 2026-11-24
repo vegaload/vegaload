@@ -36,6 +36,13 @@ couldn't also do.
   `error_rate{protocol="ftp",op="roundtrip"} < 1%`. The result includes
   `protocols` when the run recorded calls. A script HTTP 4xx or 5xx counts
   as a success in that row; use `check()` on the status to judge it.
+  `sleep(s)` / `sleep(min, max)` add think time (never in call latency),
+  each VU keeps cookies within an iteration (`-no-cookies` turns that off),
+  `export function setup()` / `teardown(data)` (Python `def setup():` /
+  `def teardown(data):`) run once around the load, and
+  `export const options = {vus, duration, stages, thresholds, ...}` (Python
+  `options = {...}`) keeps the load shape in the file; `run_test` arguments
+  win over it.
 - **run_test** — run a load test, either a scenario file or a protocol-direct
   target (`target` + `protocol`, e.g. `http1`). Pick an `executor`: `fixed-vus`
   (steady concurrency), `ramp` (stages that climb then fall), `step` (stages

@@ -191,16 +191,16 @@ func TestLiveBucketsKeepNoHistogramOnceHandedOut(t *testing.T) {
 				t.Fatalf("bucket %v: %+v", b.Offset, b)
 			}
 		}
-		most = max(most, len(c.liveHists))
+		most = max(most, len(c.live))
 	}
 	if most > 2 {
 		t.Fatalf("kept up to %d per-second histograms at once", most)
 	}
 	c.Record(engine.IterationResult{Start: c.start.Add(10 * time.Second), Duration: time.Millisecond})
-	if len(c.liveHists) > 1 {
-		t.Fatalf("a late call kept a histogram for a second already handed out: %d kept", len(c.liveHists))
+	if len(c.live) > 1 {
+		t.Fatalf("a late call kept a histogram for a second already handed out: %d kept", len(c.live))
 	}
-	if _, ok := c.liveHists[10]; ok {
+	if _, ok := c.live[10]; ok {
 		t.Fatal("a late call brought back the histogram of second 10")
 	}
 }
@@ -209,8 +209,8 @@ func TestLiveBucketsKeepNoHistogramOnceHandedOut(t *testing.T) {
 func TestNoLiveHistogramsWithoutACursor(t *testing.T) {
 	c := NewCollector()
 	feedLive(c, 5)
-	if c.liveHists != nil {
-		t.Fatalf("kept %d per-second histograms with no live cursor", len(c.liveHists))
+	if c.live != nil {
+		t.Fatalf("kept %d per-second histograms with no live cursor", len(c.live))
 	}
 }
 

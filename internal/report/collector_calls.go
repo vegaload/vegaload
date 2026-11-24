@@ -3,6 +3,7 @@ package report
 import (
 	"time"
 
+	"github.com/vegaload/vegaload/internal/failure"
 	"github.com/vegaload/vegaload/internal/secrets"
 	"github.com/vegaload/vegaload/internal/urlname"
 )
@@ -45,6 +46,7 @@ func opCap(protocol string) (int, string) {
 
 // callProto is one protocol's operations and phase measures.
 type callProto struct {
+	name         string
 	exact        bool
 	maxOps       int
 	otherOp      string
@@ -54,12 +56,20 @@ type callProto struct {
 	measureOrder []string
 }
 
-// callOp is one operation: its calls, and the bytes they moved.
+// callOp is one operation: its calls, the bytes they moved, and its
+// failures by kind. name is the row it is stored under.
 type callOp struct {
 	runStats
+	name     string
 	sent     int64
 	received int64
+	errs     errorKinds
 }
+
+// TTFBMeasure is the measure name of the time to the first byte of an
+// answer. Besides the protocol's measure, every one goes into Result.TTFB
+// and the live points.
+const TTFBMeasure = "ttfb"
 
 // RecordCall counts one finished protocol call that took d and failed with
 // err, or worked when err is nil. A nil collector counts nothing. protocol
@@ -71,16 +81,28 @@ func (c *Collector) RecordCall(protocol, op string, d time.Duration, err error, 
 	}
 	protocol = callName(protocol)
 	op = callName(op)
+	failed := err != nil
+	var reason string
+	if failed {
+		reason = failure.Reason(err)
+	}
 	c.callMu.Lock()
 	p := c.protoLocked(protocol)
 	o := p.opLocked(op)
-	o.add(d, err != nil)
+	o.add(d, failed)
 	o.sent += sent
 	o.received += received
-	c.callMu.Unlock()
-	if c.callsAreRequests.Load() {
-		c.addRequest(time.Now().Add(-d), d, err)
+	if failed {
+		o.errs.addErr(reason, err)
 	}
+	lc := &liveCall{protocol: p.name, op: o.name, sent: sent, received: received}
+	c.callMu.Unlock()
+	start := time.Now().Add(-d)
+	if c.callsAreRequests.Load() {
+		c.addRequest(request{start: start, d: d, err: err, reason: reason, call: lc})
+		return
+	}
+	c.withLive(start, func(s *liveSec) { s.addCall(lc, d, failed) })
 }
 
 // RecordMeasure counts one phase time inside a protocol. A measure is not
@@ -91,8 +113,19 @@ func (c *Collector) RecordMeasure(protocol, name string, d time.Duration) {
 	}
 	protocol = callName(protocol)
 	name = callName(name)
+	ttfb := name == TTFBMeasure
+	c.addMeasure(protocol, name, d, ttfb)
+	if ttfb {
+		c.withLive(time.Now().Add(-d), func(s *liveSec) { s.ttfb.Add(d) })
+	}
+}
+
+func (c *Collector) addMeasure(protocol, name string, d time.Duration, ttfb bool) {
 	c.callMu.Lock()
 	defer c.callMu.Unlock()
+	if ttfb {
+		c.ttfb.add(d)
+	}
 	p := c.protoLocked(protocol)
 	if p.measures == nil {
 		p.measures = map[string]*dist{}
@@ -139,7 +172,7 @@ func (c *Collector) protoLocked(name string) *callProto {
 		p, known = c.calls[name]
 	}
 	if !known {
-		p = &callProto{exact: c.exact}
+		p = &callProto{exact: c.exact, name: name}
 		p.maxOps, p.otherOp = opCap(name)
 		c.calls[name] = p
 		c.callOrder = append(c.callOrder, name)
@@ -162,7 +195,7 @@ func (p *callProto) opLocked(name string) *callOp {
 		o, known = p.ops[name]
 	}
 	if !known {
-		o = &callOp{runStats: runStats{d: newDist(p.exact)}}
+		o = &callOp{runStats: runStats{d: newDist(p.exact)}, name: name}
 		p.ops[name] = o
 		p.opOrder = append(p.opOrder, name)
 	}
@@ -176,6 +209,7 @@ type opSnap struct {
 	d              *dist
 	failed         int64
 	sent, received int64
+	errs           []ErrorKind
 }
 
 // snapshotProtocols builds the protocol breakdown. An empty recording is
@@ -193,7 +227,7 @@ func (c *Collector) snapshotProtocols(elapsed time.Duration) []ProtocolResult {
 		ps := protoSnap{name: name}
 		for _, on := range p.opOrder {
 			o := p.ops[on]
-			ps.ops = append(ps.ops, opSnap{name: on, d: o.d.snapshot(), failed: o.failed, sent: o.sent, received: o.received})
+			ps.ops = append(ps.ops, opSnap{name: on, d: o.d.snapshot(), failed: o.failed, sent: o.sent, received: o.received, errs: o.errs.list()})
 		}
 		for _, mn := range p.measureOrder {
 			ps.measures = append(ps.measures, opSnap{name: mn, d: p.measures[mn].snapshot()})
@@ -225,6 +259,7 @@ func (c *Collector) snapshotProtocols(elapsed time.Duration) []ProtocolResult {
 				Latency:       o.d.latency(),
 				BytesSent:     o.sent,
 				BytesReceived: o.received,
+				Errors:        o.errs,
 			}))
 		}
 		var measures []MeasureResult

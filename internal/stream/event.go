@@ -86,7 +86,9 @@ type ThresholdSpec struct {
 	Op       string `json:"op,omitempty"`
 }
 
-// Point is the data of point: one closed one-second bucket of the run.
+// Point is the data of point: one closed one-second bucket of the run. The
+// fields after TotalFailed were added later; a reader that does not know them
+// skips them (docs/streaming.md, "point").
 type Point struct {
 	OffsetS     float64 `json:"offsetS"`
 	RPS         float64 `json:"rps"`
@@ -98,6 +100,61 @@ type Point struct {
 	P99Ms       float64 `json:"p99Ms"`
 	Total       int64   `json:"total"`
 	TotalFailed int64   `json:"totalFailed"`
+
+	MinMs float64 `json:"minMs"`
+	AvgMs float64 `json:"avgMs"`
+	MaxMs float64 `json:"maxMs"`
+	P90Ms float64 `json:"p90Ms"`
+
+	ActiveVUs int64 `json:"activeVUs"`
+	MaxVUs    int64 `json:"maxVUs"`
+
+	IterationsStarted        int64 `json:"iterationsStarted"`
+	IterationsCompleted      int64 `json:"iterationsCompleted"`
+	IterationsDropped        int64 `json:"iterationsDropped"`
+	IterationsStartedTotal   int64 `json:"iterationsStartedTotal"`
+	IterationsCompletedTotal int64 `json:"iterationsCompletedTotal"`
+	IterationsDroppedTotal   int64 `json:"iterationsDroppedTotal"`
+
+	BytesSent          int64 `json:"bytesSent"`
+	BytesReceived      int64 `json:"bytesReceived"`
+	BytesSentTotal     int64 `json:"bytesSentTotal"`
+	BytesReceivedTotal int64 `json:"bytesReceivedTotal"`
+
+	ChecksPassed      int64 `json:"checksPassed"`
+	ChecksFailed      int64 `json:"checksFailed"`
+	ChecksPassedTotal int64 `json:"checksPassedTotal"`
+	ChecksFailedTotal int64 `json:"checksFailedTotal"`
+
+	// TTFBP50Ms and TTFBP95Ms are omitted in a second with no HTTP answer.
+	TTFBP50Ms *float64 `json:"ttfbP50Ms,omitempty"`
+	TTFBP95Ms *float64 `json:"ttfbP95Ms,omitempty"`
+
+	Steps  []PointStep      `json:"steps,omitempty"`
+	Rows   []PointRow       `json:"rows,omitempty"`
+	Errors map[string]int64 `json:"errors,omitempty"`
+}
+
+// PointStep is one step's runs in one point.
+type PointStep struct {
+	Name   string  `json:"name"`
+	Count  int64   `json:"count"`
+	Failed int64   `json:"failed"`
+	P95Ms  float64 `json:"p95Ms"`
+}
+
+// PointRow is one protocol row's calls in one point: an HTTP endpoint such as
+// "GET /users/{id}", or another protocol's operation.
+type PointRow struct {
+	Protocol string  `json:"protocol"`
+	Name     string  `json:"name"`
+	Method   string  `json:"method,omitempty"`
+	Endpoint string  `json:"endpoint,omitempty"`
+	Count    int64   `json:"count"`
+	Failed   int64   `json:"failed"`
+	P50Ms    float64 `json:"p50Ms"`
+	P95Ms    float64 `json:"p95Ms"`
+	P99Ms    float64 `json:"p99Ms"`
 }
 
 // Warning is the data of warning.

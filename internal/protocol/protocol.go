@@ -120,6 +120,9 @@ type Result struct {
 	// Refused is true when the call was stopped before any bytes moved.
 	// That is an option or safety error, not a latency.
 	Refused bool
+	// TTFB is the time to the first byte of the answer (see FirstByte). Zero
+	// if the driver does not measure it or no answer came.
+	TTFB time.Duration
 }
 
 // HTTPStatusOK is the rule every HTTP call follows unless the call names

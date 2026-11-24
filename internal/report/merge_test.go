@@ -146,6 +146,22 @@ func sortByName(r *Result) {
 		sort.Slice(p.Operations, func(i, j int) bool { return p.Operations[i].Name < p.Operations[j].Name })
 		sort.Slice(p.Measures, func(i, j int) bool { return p.Measures[i].Name < p.Measures[j].Name })
 	}
+	dropSamples(r)
+}
+
+// dropSamples blanks every error sample. A sample is the first message of
+// its kind, and which failure came first depends on how the load was split.
+func dropSamples(r *Result) {
+	for i := range r.Errors {
+		r.Errors[i].Sample = ""
+	}
+	for _, p := range r.Protocols {
+		for _, o := range p.Operations {
+			for i := range o.Errors {
+				o.Errors[i].Sample = ""
+			}
+		}
+	}
 }
 
 // firstDiff shows the first line where two results' indented JSON differ.

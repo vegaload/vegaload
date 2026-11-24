@@ -40,6 +40,18 @@ func renderHTML(res *Result) string {
 	if res.DroppedIterations > 0 {
 		fmt.Fprintf(&b, "<div class=\"stat\"><span class=\"n\">%d</span><span class=\"l\">dropped iterations</span></div>\n", res.DroppedIterations)
 	}
+	if res.VUsPeak > 0 {
+		fmt.Fprintf(&b, "<div class=\"stat\"><span class=\"n\">%d / %d</span><span class=\"l\">peak / max VUs</span></div>\n", res.VUsPeak, res.VUsMax)
+	}
+	if res.IterationsStarted > 0 {
+		fmt.Fprintf(&b, "<div class=\"stat\"><span class=\"n\">%d / %d</span><span class=\"l\">iterations started / completed</span></div>\n", res.IterationsStarted, res.IterationsCompleted)
+	}
+	if res.BytesSent > 0 || res.BytesReceived > 0 {
+		fmt.Fprintf(&b, "<div class=\"stat\"><span class=\"n\">%s / %s</span><span class=\"l\">sent / received</span></div>\n", FormatByteCount(res.BytesSent), FormatByteCount(res.BytesReceived))
+	}
+	if t := res.TTFB; t != nil {
+		fmt.Fprintf(&b, "<div class=\"stat\"><span class=\"n\">%s / %s</span><span class=\"l\">TTFB p50 / p95</span></div>\n", t.P50.Round(1e3), t.P95.Round(1e3))
+	}
 	fmt.Fprintf(&b, "</section>\n")
 
 	if a := res.Aborted; a != nil {
@@ -50,6 +62,7 @@ func renderHTML(res *Result) string {
 		fmt.Fprintf(&b, "<p class=\"warning\"><span class=\"badge fail\">WARNING</span> %s</p>\n", html.EscapeString(w))
 	}
 	b.WriteString(failuresSection(res))
+	b.WriteString(errorKindsSection(res))
 	b.WriteString(dataFilesSection(res))
 	b.WriteString(thresholdsSection(res))
 	b.WriteString(baselineSection(res))
@@ -85,6 +98,21 @@ func failuresSection(res *Result) string {
 	b.WriteString("<section class=\"failures\">\n<h2>Failures</h2>\n<table>\n<tr><th>reason</th><th>requests</th></tr>\n")
 	for _, fr := range res.FailureReasons {
 		fmt.Fprintf(&b, "<tr><td>%s</td><td>%d</td></tr>\n", html.EscapeString(fr.Reason), fr.Count)
+	}
+	b.WriteString("</table>\n</section>\n")
+	return b.String()
+}
+
+// errorKindsSection is the failures by kind, each with one sample message,
+// or nothing when none failed.
+func errorKindsSection(res *Result) string {
+	if len(res.Errors) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("<section class=\"errors\">\n<h2>Errors by kind</h2>\n<table>\n<tr><th>kind</th><th>count</th><th>sample</th></tr>\n")
+	for _, e := range res.Errors {
+		fmt.Fprintf(&b, "<tr><td>%s</td><td>%d</td><td>%s</td></tr>\n", html.EscapeString(e.Kind), e.Count, html.EscapeString(e.Sample))
 	}
 	b.WriteString("</table>\n</section>\n")
 	return b.String()

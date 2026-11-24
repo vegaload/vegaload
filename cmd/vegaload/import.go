@@ -40,6 +40,7 @@ func cmdImportHAR(args []string) int {
 	static := fs.Bool("include-static", false, "keep images, fonts, style sheets and scripts")
 	third := fs.Bool("include-third-party", false, "keep requests to other sites (analytics, ads, CDNs)")
 	max := fs.Int("max", 0, "stop after this many requests (default: no limit)")
+	thinkRaw := fs.String("think-time", "recorded", "the sleep() between requests: none, recorded (the gaps in the recording), capped:5s (recorded, at most 5s) or fixed:1s (1s every time). Gaps under 10ms are not written")
 	force := fs.Bool("force", false, "overwrite the scenario file if it exists")
 	output := fs.String("output", "text", "output mode: text or json")
 	fs.Usage = func() {
@@ -76,6 +77,11 @@ func cmdImportHAR(args []string) int {
 		fmt.Fprintf(os.Stderr, "vegaload import har: -max %d: want zero or more\n", *max)
 		return 2
 	}
+	think, err := har.ParseThinkTime(*thinkRaw)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "vegaload import har: -think-time %v\n", err)
+		return 2
+	}
 	in := files[0]
 
 	f, err := os.Open(in)
@@ -86,6 +92,7 @@ func cmdImportHAR(args []string) int {
 	defer f.Close()
 	res, err := har.Convert(f, filepath.Base(in), har.Options{
 		Hosts: []string(hosts), IncludeStatic: *static, IncludeThirdParty: *third, MaxRequests: *max,
+		ThinkTime: think,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "vegaload import har: %s: %v\n", in, err)

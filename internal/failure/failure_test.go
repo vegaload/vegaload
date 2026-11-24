@@ -10,9 +10,13 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
+
+	"github.com/vegaload/vegaload/internal/secrets"
 )
 
 func TestReason(t *testing.T) {
@@ -47,6 +51,55 @@ func TestReason(t *testing.T) {
 		if got := Reason(c.err); got != c.want {
 			t.Errorf("%s: Reason(%v) = %q, want %q", name, c.err, got, c.want)
 		}
+	}
+}
+
+func TestKind(t *testing.T) {
+	cases := map[string]struct {
+		err  error
+		want string
+	}{
+		"nil":     {nil, ""},
+		"status":  {fmt.Errorf("http1: request failed: %w", Status(503)), "status 503"},
+		"timeout": {fmt.Errorf("netapi: %w", context.DeadlineExceeded), Timeout},
+		"refused": {errors.New("dial tcp 127.0.0.1:1: connect: connection refused"), ConnectionRefused},
+		"dns":     {&net.DNSError{Err: "no such host", Name: "nope.invalid", IsNotFound: true}, DNS},
+		"tls":     {&url.Error{Op: "Get", URL: "https://x", Err: x509.UnknownAuthorityError{}}, TLS},
+		"reset":   {errors.New("read: connection reset by peer"), KindOther},
+		"other":   {errors.New("js: boom"), KindOther},
+	}
+	for name, c := range cases {
+		if got := Kind(c.err); got != c.want {
+			t.Errorf("%s: Kind(%v) = %q, want %q", name, c.err, got, c.want)
+		}
+	}
+	if KindOf("something new") != KindOther {
+		t.Error("an unknown reason is not other")
+	}
+}
+
+func TestSample_MasksRedactsAndCuts(t *testing.T) {
+	secrets.Reset()
+	t.Cleanup(secrets.Reset)
+	secrets.Register("s3cr3t-token")
+
+	err := fmt.Errorf("Get \"redis://bob:hunter2@db:6379/0\": refused\nheader s3cr3t-token was sent")
+	got := Sample(err)
+	for _, leak := range []string{"hunter2", "s3cr3t-token", "\n"} {
+		if strings.Contains(got, leak) {
+			t.Fatalf("Sample leaks %q: %s", leak, got)
+		}
+	}
+	if !strings.Contains(got, "bob:***@db") || !strings.Contains(got, secrets.Marker) {
+		t.Fatalf("Sample = %q", got)
+	}
+
+	long := Sample(errors.New(strings.Repeat("é", 300)))
+	if !strings.HasSuffix(long, "...") || len(long) > MaxSample+3 || !utf8.ValidString(long) {
+		t.Fatalf("long sample = %d bytes, valid=%v", len(long), utf8.ValidString(long))
+	}
+	if Sample(nil) != "" {
+		t.Fatal("nil error has a sample")
 	}
 }
 

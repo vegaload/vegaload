@@ -7,11 +7,9 @@ import (
 	"math"
 	"net/url"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/vegaload/vegaload/internal/engine"
@@ -111,7 +109,6 @@ type streaming struct {
 	collector  *report.Collector // set once the run's clock starts
 	executor   string
 	closeOnce  sync.Once
-	sigStop    func()
 	closeStuck []string
 }
 
@@ -365,7 +362,7 @@ func (f *pointFeed) finishWith(warnings []string) {
 }
 
 func toPoint(b report.BucketStat) stream.Point {
-	return stream.Point{
+	p := stream.Point{
 		OffsetS:     b.Offset.Seconds(),
 		RPS:         b.RPS,
 		Requests:    b.Requests,
@@ -376,7 +373,48 @@ func toPoint(b report.BucketStat) stream.Point {
 		P99Ms:       ms(b.P99),
 		Total:       b.Total,
 		TotalFailed: b.TotalFailed,
+
+		MinMs: ms(b.Min),
+		AvgMs: ms(b.Mean),
+		MaxMs: ms(b.Max),
+		P90Ms: ms(b.P90),
+
+		ActiveVUs: b.ActiveVUs,
+		MaxVUs:    b.MaxVUs,
+
+		IterationsStarted:        b.IterationsStarted,
+		IterationsCompleted:      b.IterationsCompleted,
+		IterationsDropped:        b.IterationsDropped,
+		IterationsStartedTotal:   b.IterationsStartedTotal,
+		IterationsCompletedTotal: b.IterationsCompletedTotal,
+		IterationsDroppedTotal:   b.IterationsDroppedTotal,
+
+		BytesSent:          b.BytesSent,
+		BytesReceived:      b.BytesReceived,
+		BytesSentTotal:     b.BytesSentTotal,
+		BytesReceivedTotal: b.BytesReceivedTotal,
+
+		ChecksPassed:      b.ChecksPassed,
+		ChecksFailed:      b.ChecksFailed,
+		ChecksPassedTotal: b.ChecksPassedTotal,
+		ChecksFailedTotal: b.ChecksFailedTotal,
+
+		Errors: b.Errors,
 	}
+	if b.TTFBCount > 0 {
+		p50, p95 := ms(b.TTFBP50), ms(b.TTFBP95)
+		p.TTFBP50Ms, p.TTFBP95Ms = &p50, &p95
+	}
+	for _, s := range b.Steps {
+		p.Steps = append(p.Steps, stream.PointStep{Name: s.Name, Count: s.Count, Failed: s.Failed, P95Ms: ms(s.P95)})
+	}
+	for _, r := range b.Rows {
+		p.Rows = append(p.Rows, stream.PointRow{
+			Protocol: r.Protocol, Name: r.Name, Method: r.Method, Endpoint: r.Endpoint,
+			Count: r.Count, Failed: r.Failed, P50Ms: ms(r.P50), P95Ms: ms(r.P95), P99Ms: ms(r.P99),
+		})
+	}
+	return p
 }
 
 func ms(d time.Duration) float64 { return math.Round(float64(d)/float64(time.Millisecond)*1000) / 1000 }
@@ -441,38 +479,12 @@ func (o *runOutcome) fail(err error) {
 	o.reason = secrets.Redact(urlerr.Mask(err.Error()))
 }
 
-// watchSignals ends the stream with run.failed (reason "interrupted") on
-// Ctrl-C or SIGTERM, then exits with the status a process killed by that
-// signal shows in a shell (130, 143). Without a stream, `run` installs no
-// handler and a signal kills it exactly as before.
-func (st *streaming) watchSignals() {
-	ch := make(chan os.Signal, 1)
-	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
-	quit := make(chan struct{})
-	st.sigStop = func() {
-		signal.Stop(ch)
-		close(quit)
-	}
-	go func() {
-		select {
-		case sig := <-ch:
-			// A second signal must not be swallowed while the sinks flush.
-			signal.Stop(ch)
-			os.Exit(st.interrupt(sig))
-		case <-quit:
-		}
-	}()
-}
-
 // interrupt ends the stream for a run stopped by sig and returns the exit
 // code a shell shows for a process killed by it: 130 for Ctrl-C, 143 for SIGTERM.
 func (st *streaming) interrupt(sig os.Signal) int {
 	st.rec.Failed("interrupted", st.partialOrNil())
 	st.closeSinks(interruptCloseTimeout)
-	if sig == syscall.SIGTERM {
-		return 143
-	}
-	return 130
+	return signalExitCode(sig)
 }
 
 // partialOrNil returns the partial result as an any that is nil when there is none.
@@ -490,9 +502,6 @@ func (st *streaming) partialOrNil() any {
 func (st *streaming) end(cfg *runConfig, out *runOutcome, code int) {
 	if st == nil {
 		return
-	}
-	if st.sigStop != nil {
-		st.sigStop()
 	}
 	if out.result != nil {
 		st.rec.Finished(out.result, code == 0, code)

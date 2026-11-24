@@ -34,11 +34,11 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -53,9 +53,7 @@ import (
 	"github.com/vegaload/vegaload/internal/protocol/xfercommon"
 	"github.com/vegaload/vegaload/internal/report"
 	"github.com/vegaload/vegaload/internal/safety"
-	"github.com/vegaload/vegaload/internal/scripting/js"
 	"github.com/vegaload/vegaload/internal/scripting/netapi"
-	"github.com/vegaload/vegaload/internal/scripting/python"
 	"github.com/vegaload/vegaload/internal/secrets"
 	"github.com/vegaload/vegaload/internal/threshold"
 	"github.com/vegaload/vegaload/internal/urlname"
@@ -140,6 +138,8 @@ type runConfig struct {
 	// row, instead of replacing the parts that look like ids with {id}
 	// (-no-url-grouping).
 	NoURLGrouping bool
+	// NoCookies turns off each scenario VU's cookie jar (-no-cookies).
+	NoCookies bool
 
 	OutPath string
 
@@ -206,7 +206,20 @@ type runConfig struct {
 	// nil when the run is not streamed, and then nothing streams.
 	Stream runStream
 	stream *streaming
+
+	// StatsAddr is -stats-addr: serve /stats there while the run goes on,
+	// and for StatsLinger after it. stats is that server; nil without it.
+	StatsAddr   string
+	StatsLinger time.Duration
+	stats       *statsExporter
+
+	// runCtx ends when the run is stopped by Ctrl-C or SIGTERM. It is nil
+	// when nothing can stop it, such as in a test.
+	runCtx context.Context //nolint:containedctx // set by cmdRun for the one run this config describes
 }
+
+// errInterrupted is a run stopped by Ctrl-C or SIGTERM.
+var errInterrupted = errors.New("interrupted")
 
 // parseRunArgs parses run's flags into a runConfig. It returns a usage
 // error (rather than exiting the process) so it can be exercised by
@@ -238,6 +251,7 @@ func parseRunArgs(args []string) (*runConfig, error) {
 	fs.BoolVar(&insecure, "insecure", false, "skip TLS certificate verification")
 	fs.DurationVar(&cfg.Timeout, "timeout", 30*time.Second, "time limit for each request: each -protocol call, or each call a scenario makes. A request that runs out of time fails with the reason \"timeout\"")
 	fs.BoolVar(&cfg.NoConnectionReuse, "no-connection-reuse", false, "open a new connection for every HTTP request, in a scenario and in -protocol http1 or http2, instead of keeping connections open between requests. Use it to measure connection setup on purpose")
+	fs.BoolVar(&cfg.NoCookies, "no-cookies", false, "turn off each scenario VU's cookie jar. By default a cookie a server sets is sent back on that VU's later calls, and the jar is emptied at the start of each iteration")
 	fs.BoolVar(&cfg.NoURLGrouping, "no-url-grouping", false, "keep each HTTP call's URL path as it is in its endpoint row. By default, path parts that are numbers, UUIDs or long hex strings become {id}, so /users/1 and /users/2 share the row GET /users/{id}")
 	fs.StringVar(&cfg.OutPath, "out", "", "also write a JSON summary to this path")
 	fs.BoolVar(&cfg.ExactPercentiles, "exact-percentiles", false, "keep every sample to compute exact percentiles, instead of estimating them within 2.5% from histograms. Memory grows with the number of requests: use it for small local runs")
@@ -264,6 +278,10 @@ func parseRunArgs(args []string) (*runConfig, error) {
 
 	// docs/streaming.md: stream the run, and the live view.
 	cfg.Stream.register(fs)
+
+	// The /stats exporter, for a scraper such as the Harness stats sidecar's.
+	fs.StringVar(&cfg.StatsAddr, "stats-addr", "", "serve the run's cumulative numbers as JSON at http://ADDR/stats, in the Harness k6 stats sidecar's shape, plus /healthz. \":9093\" listens on every interface, \"127.0.0.1:9093\" on this machine only. Nothing is sent anywhere")
+	fs.DurationVar(&cfg.StatsLinger, "stats-linger", 0, "with -stats-addr: keep serving the final numbers this long after the run before exiting, e.g. 30s (Ctrl-C stops it)")
 
 	// FR-CLI-11: pass/fail thresholds.
 	fs.Var(&thresholdExprs, "threshold", "pass/fail threshold on the run, e.g. \"p95 < 300ms\", \"p95{step=\\\"login\\\"} < 300ms\" or \"p95{protocol=\\\"ftp\\\"} < 500ms\" (repeatable; metrics: "+strings.Join(threshold.MetricNames(), ", ")+"). A breach exits 3")
@@ -334,9 +352,6 @@ func parseRunArgs(args []string) (*runConfig, error) {
 		cfg.Thresholds = append(cfg.Thresholds, ts...)
 	}
 
-	if cfg.AbortOnBreach && len(cfg.Thresholds) == 0 {
-		return nil, fmt.Errorf("-abort-on-breach needs at least one -threshold or -thresholds")
-	}
 	if cfg.AbortGrace < 0 {
 		return nil, fmt.Errorf("-abort-grace %s: want zero or more", cfg.AbortGrace)
 	}
@@ -347,6 +362,12 @@ func parseRunArgs(args []string) (*runConfig, error) {
 	})
 	if cfg.AbortGraceSet && !cfg.AbortOnBreach {
 		return nil, fmt.Errorf("-abort-grace needs -abort-on-breach")
+	}
+	if cfg.StatsLinger < 0 {
+		return nil, fmt.Errorf("-stats-linger %s: want zero or more", cfg.StatsLinger)
+	}
+	if cfg.StatsLinger > 0 && cfg.StatsAddr == "" {
+		return nil, fmt.Errorf("-stats-linger needs -stats-addr")
 	}
 
 	if !cfg.NoStepSummary {
@@ -388,6 +409,19 @@ func parseRunArgs(args []string) (*runConfig, error) {
 	}
 	if cfg.ScenarioPath != "" && len(cfg.Target.Options) > 0 {
 		return nil, fmt.Errorf("-opt sets options for a protocol driver, so it needs -target and -protocol, not a scenario file")
+	}
+	if cfg.ScenarioPath != "" {
+		given := map[string]bool{}
+		fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
+		if err := applyScenarioOptions(cfg, given); err != nil {
+			return nil, err
+		}
+	}
+	if cfg.AbortOnBreach && len(cfg.Thresholds) == 0 {
+		return nil, fmt.Errorf("-abort-on-breach needs at least one -threshold or -thresholds")
+	}
+	if cfg.NoCookies && cfg.Protocol != "" {
+		return nil, fmt.Errorf("-no-cookies is for a scenario's http calls, not -protocol %s", cfg.Protocol)
 	}
 	if cfg.Protocol != "" {
 		if _, ok := findDriver(cfg.Protocol); !ok {
@@ -528,17 +562,28 @@ func concurrencyHint(cfg *runConfig) int {
 
 // buildIteration returns the engine.IterationFunc for cfg (either
 // protocol-direct or scripted) and a cleanup function the caller must
-// run once the executor has finished.
-func buildIteration(cfg *runConfig) (engine.IterationFunc, func() error, error) {
+// run once the executor has finished. For a scenario it also returns the
+// loaded scenario, for its setup and teardown; it is nil otherwise.
+//
+// A scenario's VUs come from a pool (see vupool.go) and every one gets the
+// same netapi.SafetyCheck and cfg.Timeout, so FR-CLI-08's http/ws globals
+// enforce FR-CLI-06's allowlist and respect the run's per-request timeout
+// exactly as -target/-protocol mode's own driver does.
+func buildIteration(cfg *runConfig) (engine.IterationFunc, func() error, *scenario, error) {
 	if cfg.ScenarioPath != "" {
-		return scriptedIteration(cfg, concurrencyHint(cfg))
+		sc, err := loadScenario(cfg, concurrencyHint(cfg))
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		return sc.pool.iteration, sc.Close, sc, nil
 	}
 	// One driver serves every VU, so its connection pool is sized from
 	// the most VUs that can be in flight at once.
 	target := cfg.Target
 	target.MaxConns = concurrencyHint(cfg)
 	target.NoConnectionReuse = cfg.NoConnectionReuse
-	return protocolIteration(cfg.Protocol, target, cfg.Timeout, cfg.callRecorder, cfg.DataPlan, cfg.NoURLGrouping)
+	iter, closeFn, err := protocolIteration(cfg.Protocol, target, cfg.Timeout, cfg.callRecorder, cfg.DataPlan, cfg.NoURLGrouping)
+	return iter, closeFn, nil, err
 }
 
 // buildSafetyCheck returns the netapi.SafetyCheck every scripted VU's
@@ -709,6 +754,9 @@ func recordDriverCall(rec netapi.CallRecorder, ctx context.Context, protocolName
 		return false
 	}
 	rec.RecordCall(protocolName, op, d, err, res.BytesSent, res.BytesReceived)
+	if res.TTFB > 0 {
+		rec.RecordMeasure(protocolName, protocol.TTFBMeasure, res.TTFB)
+	}
 	return true
 }
 
@@ -716,78 +764,6 @@ func recordDriverCall(rec netapi.CallRecorder, ctx context.Context, protocolName
 // before any bytes moved. It is a script or option error, not a latency.
 func driverRefused(res protocol.Result) bool {
 	return res.Refused
-}
-
-// scriptedIteration loads cfg.ScenarioPath (as JavaScript/TypeScript or
-// Python, decided by extension) and returns an engine.IterationFunc
-// backed by a vuPool sized by concurrency — see vupool.go for why a
-// pool, rather than one shared runtime, is needed here.
-//
-// Every VU it creates gets the same netapi.SafetyCheck (built once, via
-// buildSafetyCheck) and cfg.Timeout, so FR-CLI-08's http/ws globals
-// enforce FR-CLI-06's allowlist and respect the run's per-request
-// timeout exactly as -target/-protocol mode's own driver does.
-func scriptedIteration(cfg *runConfig, concurrency int) (engine.IterationFunc, func() error, error) {
-	path := cfg.ScenarioPath
-	check := buildSafetyCheck(cfg)
-
-	if strings.ToLower(filepath.Ext(path)) == ".py" {
-		script, err := python.Load(path)
-		if err != nil {
-			return nil, nil, err
-		}
-		opts := []python.Option{python.WithInputs(cfg.Inputs)}
-		if cfg.NoConnectionReuse {
-			opts = append(opts, python.WithNoConnectionReuse())
-		}
-		if cfg.NoURLGrouping {
-			opts = append(opts, python.WithNoURLGrouping())
-		}
-		pool := newVUPool(concurrency, func() (iterCloser, error) {
-			vu, err := script.NewVU(check, cfg.Timeout, opts...)
-			if err != nil {
-				return nil, err
-			}
-			vu.SetCheckRecorder(cfg.checkRecorder)
-			vu.SetStepRecorder(cfg.stepRecorder)
-			vu.SetCallRecorder(cfg.callRecorder)
-			return vu, nil
-		})
-		// Validate the script once, up front, the same way
-		// protocol-direct mode's New() fails fast on a bad target,
-		// instead of only discovering a broken script on the first
-		// iteration deep inside the executor.
-		if _, err := pool.borrowAndRelease(); err != nil {
-			return nil, nil, err
-		}
-		return pool.iteration, pool.Close, nil
-	}
-
-	script, err := js.Load(path)
-	if err != nil {
-		return nil, nil, err
-	}
-	opts := []js.Option{js.WithInputs(cfg.Inputs)}
-	if cfg.NoConnectionReuse {
-		opts = append(opts, js.WithNoConnectionReuse())
-	}
-	if cfg.NoURLGrouping {
-		opts = append(opts, js.WithNoURLGrouping())
-	}
-	pool := newVUPool(concurrency, func() (iterCloser, error) {
-		vu, err := script.NewVU(check, cfg.Timeout, opts...)
-		if err != nil {
-			return nil, err
-		}
-		vu.SetCheckRecorder(cfg.checkRecorder)
-		vu.SetStepRecorder(cfg.stepRecorder)
-		vu.SetCallRecorder(cfg.callRecorder)
-		return vu, nil
-	})
-	if _, err := pool.borrowAndRelease(); err != nil {
-		return nil, nil, err
-	}
-	return pool.iteration, pool.Close, nil
 }
 
 // runScenario runs cfg end to end: builds the executor and iteration
@@ -816,14 +792,40 @@ func runScenarioWithCollector(cfg *runConfig, collector *report.Collector) (*rep
 	cfg.checkRecorder = collector
 	cfg.stepRecorder = collector
 	cfg.callRecorder = collector
+	collector.SetPlannedVUs(concurrencyHint(cfg))
 	// A scenario's iteration can make any number of calls, so each call,
 	// not each iteration, is one request of the run.
 	if cfg.ScenarioPath != "" {
 		collector.RequestsFromCalls()
 	}
 
-	// A streamed run says it has started before the scenario is loaded, so a
-	// scenario that cannot be loaded is a run.failed after a run.started.
+	iter, closeFn, sc, err := buildIteration(cfg)
+	if err != nil {
+		return nil, err
+	}
+	defer closeFn() //nolint:errcheck // best-effort cleanup; a close failure shouldn't mask the run's own result
+
+	// runCtx ends on Ctrl-C or SIGTERM (see runSignals). The load stops,
+	// and teardown still runs.
+	runCtx := cfg.runCtx
+	if runCtx == nil {
+		runCtx = context.Background()
+	}
+	if sc != nil {
+		if err := sc.setup(runCtx, lifecycleTimeout(cfg)); err != nil {
+			if runCtx.Err() != nil {
+				return nil, errInterrupted
+			}
+			return nil, err
+		}
+		// A slow setup is not part of the run's time.
+		collector.StartNow()
+	}
+
+	// A streamed run says it has started once it is ready to send load. A
+	// scenario that cannot be loaded, or whose setup fails, still ends with
+	// a run.failed after a run.started (see streaming.end).
+	cfg.stats.attach(collector, ex.Name())
 	var feed *pointFeed
 	if cfg.stream != nil {
 		feed = cfg.stream.begin(cfg, ex, collector)
@@ -831,13 +833,7 @@ func runScenarioWithCollector(cfg *runConfig, collector *report.Collector) (*rep
 		defer feed.finish()
 	}
 
-	iter, closeFn, err := buildIteration(cfg)
-	if err != nil {
-		return nil, err
-	}
-	defer closeFn() //nolint:errcheck // best-effort cleanup; a close failure shouldn't mask the run's own result
-
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(runCtx)
 	defer cancel()
 
 	start := time.Now()
@@ -864,13 +860,28 @@ func runScenarioWithCollector(cfg *runConfig, collector *report.Collector) (*rep
 	runErr := ex.Run(ctx, iter, collector)
 	genStats := gen.Stop()
 	stopWatcher()
+	elapsed := time.Since(start)
+	// teardown runs however the load ended: at its planned end, stopped by
+	// -abort-on-breach, by Ctrl-C, or with an error.
+	var teardownErr error
+	if sc != nil {
+		teardownErr = sc.teardown(lifecycleTimeout(cfg))
+	}
 	if runErr != nil {
 		return nil, runErr
 	}
-	elapsed := time.Since(start)
+	if runCtx.Err() != nil {
+		if teardownErr != nil {
+			fmt.Fprintf(os.Stderr, "vegaload run: warning: %s\n", secrets.Redact(teardownErr.Error()))
+		}
+		return nil, errInterrupted
+	}
 
 	result := collector.Finish(ex.Name(), elapsed)
 	applyGenerator(result, genStats, collector.DroppedPercent())
+	if teardownErr != nil {
+		result.Warnings = append(result.Warnings, secrets.Redact(teardownErr.Error()))
+	}
 	if feed != nil {
 		feed.finishWith(result.Warnings)
 	}
@@ -999,6 +1010,19 @@ func cmdRun(args []string) int {
 		abortNote(os.Stderr, cfg.Thresholds)
 	}
 
+	// The /stats server listens before anything else starts, so an address
+	// that is taken stops the run before any load or stream.
+	if cfg.StatsAddr != "" {
+		se, err := startStats(cfg.StatsAddr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "vegaload run: -stats-addr: %v\n", err)
+			return 2
+		}
+		defer se.close()
+		cfg.stats = se
+		fmt.Fprintf(os.Stderr, "stats: %s\n", se.url())
+	}
+
 	// The stream and the live view, when there is one. A destination that
 	// breaks a rule stops the run before it starts.
 	st, err := cfg.Stream.setup(cfg.NoOpen)
@@ -1012,10 +1036,20 @@ func cmdRun(args []string) int {
 		for _, w := range st.warnings {
 			fmt.Fprintln(os.Stderr, w)
 		}
-		st.watchSignals()
 	}
+	sigs := watchRunSignals(st)
+	cfg.runCtx = sigs.ctx
 	code := executeRun(cfg, &out)
+	cfg.stats.finish(out.result)
+	sigs.stop()
+	sig := sigs.received()
+	if sig != nil {
+		code = signalExitCode(sig)
+	}
 	st.end(cfg, &out, code)
+	if sig == nil {
+		cfg.stats.linger(cfg.StatsLinger, os.Stderr)
+	}
 	return code
 }
 
@@ -1250,6 +1284,7 @@ func printResult(w io.Writer, r *report.Result) {
 	fmt.Fprintf(w, "  total:    %d\n", r.Total)
 	fmt.Fprintf(w, "  failed:   %d\n", r.Failed)
 	fmt.Fprintf(w, "  mean:     %s\n", r.Latency.Mean)
+	printLoad(w, r)
 	if len(r.FailureReasons) > 0 {
 		fmt.Fprintf(w, "  failures: %s\n", failureReasonsText(r.FailureReasons))
 	}
@@ -1262,6 +1297,7 @@ func printResult(w io.Writer, r *report.Result) {
 	for _, warning := range r.Warnings {
 		fmt.Fprintf(w, "  WARNING:  %s\n", warning)
 	}
+	printErrorKinds(w, r)
 	printIterations(w, r)
 	printChecks(w, r)
 	printSteps(w, r)
@@ -1270,6 +1306,34 @@ func printResult(w io.Writer, r *report.Result) {
 	printProtocols(w, r)
 	printThresholds(w, r)
 	printBaseline(w, r)
+}
+
+// printLoad writes the VUs, iterations, bytes and time to first byte of the
+// run, each line only when the run has it.
+func printLoad(w io.Writer, r *report.Result) {
+	if r.VUsPeak > 0 {
+		fmt.Fprintf(w, "  vus:      peak %d of %d\n", r.VUsPeak, r.VUsMax)
+	}
+	if r.IterationsStarted > 0 || r.IterationsCompleted > 0 {
+		fmt.Fprintf(w, "  iters:    %d started, %d completed\n", r.IterationsStarted, r.IterationsCompleted)
+	}
+	if r.BytesSent > 0 || r.BytesReceived > 0 {
+		fmt.Fprintf(w, "  bytes:    %s sent, %s received\n", report.FormatByteCount(r.BytesSent), report.FormatByteCount(r.BytesReceived))
+	}
+	if t := r.TTFB; t != nil {
+		fmt.Fprintf(w, "  ttfb:     p50 %s  p95 %s  p99 %s\n", t.P50.Round(time.Microsecond), t.P95.Round(time.Microsecond), t.P99.Round(time.Microsecond))
+	}
+}
+
+// printErrorKinds writes one sample message for each kind of failure.
+func printErrorKinds(w io.Writer, r *report.Result) {
+	if len(r.Errors) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "\nerrors by kind (one sample each)")
+	for _, e := range r.Errors {
+		fmt.Fprintf(w, "  %8d  %-18s  %s\n", e.Count, e.Kind, e.Sample)
+	}
 }
 
 // failureReasonsText lists the failure counts, e.g. "12 status 503, 3 timeout".

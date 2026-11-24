@@ -23,6 +23,9 @@ func MarkdownSummary(res *Result) string {
 		res.Total, res.Failed, res.ErrorRate*100,
 		res.Latency.P50.Round(time.Microsecond), res.Latency.P95.Round(time.Microsecond),
 		res.Latency.P99.Round(time.Microsecond), rps)
+	if line := loadLine(res); line != "" {
+		b.WriteString("\n" + line + "\n")
+	}
 
 	if a := res.Aborted; a != nil {
 		fmt.Fprintf(&b, "\n**Aborted:** the run was stopped at %s because %s was broken (observed %s).\n",
@@ -35,6 +38,12 @@ func MarkdownSummary(res *Result) string {
 		b.WriteString("\n### Failures\n\n| Reason | Requests |\n|---|---:|\n")
 		for _, fr := range res.FailureReasons {
 			fmt.Fprintf(&b, "| %s | %d |\n", mdCell(fr.Reason), fr.Count)
+		}
+	}
+	if len(res.Errors) > 0 {
+		b.WriteString("\n### Errors by kind\n\n| Kind | Count | Sample |\n|---|---:|---|\n")
+		for _, e := range res.Errors {
+			fmt.Fprintf(&b, "| %s | %d | %s |\n", mdCell(e.Kind), e.Count, mdCell(e.Sample))
 		}
 	}
 	if it := res.Iterations; it != nil {
@@ -152,6 +161,28 @@ func passWord(ok bool) string {
 
 // mdCell makes s safe inside a Markdown table cell: a pipe would start a
 // new cell, and a line break would end the row.
+// loadLine is one line on the VUs, iterations, bytes and time to first byte
+// of the run, with only the parts it has, or "".
+func loadLine(res *Result) string {
+	var parts []string
+	if res.VUsPeak > 0 {
+		parts = append(parts, fmt.Sprintf("peak %d of %d VUs", res.VUsPeak, res.VUsMax))
+	}
+	if res.IterationsStarted > 0 {
+		parts = append(parts, fmt.Sprintf("%d iterations started, %d completed", res.IterationsStarted, res.IterationsCompleted))
+	}
+	if res.BytesSent > 0 || res.BytesReceived > 0 {
+		parts = append(parts, fmt.Sprintf("%s sent, %s received", FormatByteCount(res.BytesSent), FormatByteCount(res.BytesReceived)))
+	}
+	if t := res.TTFB; t != nil {
+		parts = append(parts, fmt.Sprintf("TTFB p50 %s, p95 %s", t.P50.Round(time.Microsecond), t.P95.Round(time.Microsecond)))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "**Load:** " + strings.Join(parts, "; ") + "."
+}
+
 func mdCell(s string) string {
 	s = strings.NewReplacer("\r", " ", "\n", " ").Replace(s)
 	return strings.ReplaceAll(s, "|", `\|`)

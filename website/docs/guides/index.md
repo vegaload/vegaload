@@ -18,6 +18,7 @@ A released binary does not include the examples folder.
 - [Thresholds](/guides/thresholds). Add `-threshold` to make a run pass or fail on its own numbers, for example in CI:
 - [Compare runs](/guides/compare-runs). After another run with `-out candidate.json`:
 - [Merge results](/guides/merge-results). Combine the JSON reports of runs that sent load at the same time from several machines into one report.
+- [Serve the live numbers at /stats](/guides/stats-endpoint). `-stats-addr 127.0.0.1:9093` serves the run's numbers as JSON while it runs, in the shape of the Harness k6 stats sidecar.
 - [Explain a run](/guides/explain-a-run). Keep a run's JSON summary alongside its HTML report with `-out`:
 
 <!-- vegaload:protocols -->

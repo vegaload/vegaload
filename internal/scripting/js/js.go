@@ -7,6 +7,11 @@
 //	  // one iteration's worth of work
 //	}
 //
+// It may also export setup() and teardown(data), which a run calls once
+// each around the load, and an options object with its load shape. The
+// default function gets what setup returned. sleep(seconds) and
+// sleep(min, max) wait without making a call.
+//
 // A .ts file is accepted too: it is transpiled to JavaScript (types
 // stripped, ESM import/export rewritten to a form this package can read
 // back out) with esbuild before Goja ever sees it. esbuild is a
@@ -140,6 +145,20 @@ type VU struct {
 	vm *goja.Runtime
 	fn goja.Callable
 
+	// setup and teardown are the script's exported setup and teardown
+	// functions, or nil. options is its exported options value, or nil.
+	setup    goja.Callable
+	teardown goja.Callable
+	options  goja.Value
+	// data is what setup returned, this VU's own copy, passed to every
+	// iteration. It is undefined when the script has no setup.
+	data goja.Value
+	// stringify and parse are JSON.stringify and JSON.parse, kept before
+	// the script runs, so a script that replaces JSON does not change
+	// how setup data travels.
+	stringify goja.Callable
+	parse     goja.Callable
+
 	http        *netapi.HTTPClient
 	proto       *netapi.ProtoClient
 	safetyCheck netapi.SafetyCheck
@@ -210,6 +229,11 @@ func WithNoURLGrouping() Option {
 	return func(v *VU) { v.httpOpts = append(v.httpOpts, netapi.NoURLGrouping()) }
 }
 
+// WithNoCookies turns off the VU's cookie jar (-no-cookies).
+func WithNoCookies() Option {
+	return func(v *VU) { v.httpOpts = append(v.httpOpts, netapi.NoCookies()) }
+}
+
 // NewVU creates a fresh VU from the script: a new runtime, the script's
 // top-level code run once (so top-level state like a counter declared
 // with let/const starts fresh for this VU), its default export resolved
@@ -235,11 +259,16 @@ func (s *Script) NewVU(check netapi.SafetyCheck, timeout time.Duration, opts ...
 		safetyCheck: check,
 		timeout:     timeout,
 		urlKey:      goja.NewSymbol("vegaload.url"),
+		data:        goja.Undefined(),
 	}
 	for _, opt := range opts {
 		opt(v)
 	}
 	v.http = netapi.NewHTTPClient(check, timeout, v.httpOpts...)
+
+	jsonObj := vm.Get("JSON").ToObject(vm)
+	v.stringify, _ = goja.AssertFunction(jsonObj.Get("stringify"))
+	v.parse, _ = goja.AssertFunction(jsonObj.Get("parse"))
 
 	exportsObj := vm.NewObject()
 	moduleObj := vm.NewObject()
@@ -275,6 +304,9 @@ func (s *Script) NewVU(check netapi.SafetyCheck, timeout time.Duration, opts ...
 	if err := vm.Set("group", v.newGroupFunc(vm)); err != nil {
 		return nil, fmt.Errorf("js: %w", err)
 	}
+	if err := vm.Set("sleep", v.newSleepFunc(vm)); err != nil {
+		return nil, fmt.Errorf("js: %w", err)
+	}
 	if err := vm.Set("env", v.newEnvGlobal(vm)); err != nil {
 		return nil, fmt.Errorf("js: %w", err)
 	}
@@ -306,8 +338,121 @@ func (s *Script) NewVU(check netapi.SafetyCheck, timeout time.Duration, opts ...
 		return nil, fmt.Errorf("js: default export is not a function")
 	}
 	v.fn = fn
+	for name, dst := range map[string]*goja.Callable{"setup": &v.setup, "teardown": &v.teardown} {
+		val := exportsAsObject.Get(name)
+		if val == nil || goja.IsUndefined(val) {
+			continue
+		}
+		f, ok := goja.AssertFunction(val)
+		if !ok {
+			return nil, fmt.Errorf("js: the %s export is not a function", name)
+		}
+		*dst = f
+	}
+	if o := exportsAsObject.Get("options"); o != nil && !goja.IsUndefined(o) {
+		v.options = o
+	}
 
 	return v, nil
+}
+
+// HasSetup says whether the script exports a setup function.
+func (v *VU) HasSetup() bool { return v.setup != nil }
+
+// HasTeardown says whether the script exports a teardown function.
+func (v *VU) HasTeardown() bool { return v.teardown != nil }
+
+// Setup runs the script's setup function once and returns its value as
+// JSON ("null" when it returns nothing). A value JSON cannot hold, such as
+// a BigInt or an object that contains itself, is an error.
+func (v *VU) Setup(ctx context.Context) (json.RawMessage, error) {
+	if v.setup == nil {
+		return json.RawMessage("null"), nil
+	}
+	res, err := v.run(ctx, v.setup)
+	if err != nil {
+		return nil, err
+	}
+	data, err := v.toJSON(res)
+	if err != nil {
+		return nil, fmt.Errorf("js: setup must return a value JSON can hold: %w", err)
+	}
+	return data, nil
+}
+
+// Teardown runs the script's teardown function once with data, the JSON
+// setup returned.
+func (v *VU) Teardown(ctx context.Context, data json.RawMessage) error {
+	if v.teardown == nil {
+		return nil
+	}
+	val, err := v.fromJSON(data)
+	if err != nil {
+		return err
+	}
+	_, err = v.run(ctx, v.teardown, val)
+	return err
+}
+
+// SetData gives this VU its own copy of data, the JSON setup returned. It
+// is passed to the default function on every iteration. Call it before the
+// first Iteration.
+func (v *VU) SetData(data json.RawMessage) error {
+	val, err := v.fromJSON(data)
+	if err != nil {
+		return err
+	}
+	v.data = val
+	return nil
+}
+
+// Options returns the script's exported options object as plain JSON
+// values (numbers are float64), or nil when it exports none.
+func (v *VU) Options() (map[string]any, error) {
+	if v.options == nil {
+		return nil, nil
+	}
+	if obj, ok := v.options.(*goja.Object); !ok || obj.ClassName() != "Object" {
+		return nil, fmt.Errorf("js: options must be an object, like export const options = { vus: 10 }")
+	}
+	raw, err := v.toJSON(v.options)
+	if err != nil {
+		return nil, fmt.Errorf("js: options: %w", err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("js: options: %w", err)
+	}
+	return out, nil
+}
+
+func (v *VU) toJSON(val goja.Value) (json.RawMessage, error) {
+	if val == nil || goja.IsUndefined(val) {
+		return json.RawMessage("null"), nil
+	}
+	out, err := v.stringify(goja.Undefined(), val)
+	if err != nil {
+		var jsErr *goja.Exception
+		if errors.As(err, &jsErr) {
+			return nil, errors.New(jsErr.Value().String())
+		}
+		return nil, err
+	}
+	if goja.IsUndefined(out) {
+		return nil, fmt.Errorf("%s is not a JSON value", val.String())
+	}
+	return json.RawMessage(out.String()), nil
+}
+
+func (v *VU) fromJSON(data json.RawMessage) (goja.Value, error) {
+	if len(data) == 0 {
+		return goja.Undefined(), nil
+	}
+	val, err := v.parse(goja.Undefined(), v.vm.ToValue(string(data)))
+	if err != nil {
+		return nil, fmt.Errorf("js: reading setup data: %w", err)
+	}
+	return val, nil
 }
 
 // newConsole builds a minimal console object (just log, matching what a
@@ -419,6 +564,32 @@ func (v *VU) newCheckFunc(vm *goja.Runtime) func(goja.FunctionCall) goja.Value {
 			}
 		}
 		return vm.ToValue(allPassed)
+	}
+}
+
+// newSleepFunc builds the sleep(seconds) and sleep(min, max) global. It
+// waits on this VU only, and wakes as soon as the run ends. A sleep is not
+// a call, so it is in no call's latency, but it is part of the iteration's
+// time and of the step or group around it.
+func (v *VU) newSleepFunc(vm *goja.Runtime) func(goja.FunctionCall) goja.Value {
+	return func(call goja.FunctionCall) goja.Value {
+		args := make([]any, len(call.Arguments))
+		for i, a := range call.Arguments {
+			args[i] = a.Export()
+		}
+		d, err := netapi.SleepArgs(args)
+		if err != nil {
+			throw(vm, err)
+		}
+		if v.ctx == nil {
+			throw(vm, errors.New("sleep: only inside the default function, setup or teardown"))
+		}
+		if !netapi.Sleep(v.ctx, d) {
+			// The run ended. Stop the script here, the same way the end of
+			// the run stops one that is running code.
+			vm.Interrupt(v.ctx.Err())
+		}
+		return goja.Undefined()
 	}
 }
 
@@ -841,9 +1012,20 @@ func (v *VU) wrapWSConn(vm *goja.Runtime, conn *netapi.WSConn) *goja.Object {
 // If ctx is cancelled while the function is running, Iteration
 // interrupts the runtime and returns promptly instead of waiting for a
 // runaway script to finish on its own.
+//
+// The cookie jar starts empty, so each iteration is one user's session.
+// The default function gets the data setup returned as its argument.
 func (v *VU) Iteration(ctx context.Context) error {
+	_, err := v.run(ctx, v.fn, v.data)
+	return err
+}
+
+// run calls fn with ctx as the context of every call it makes, and an
+// empty cookie jar, and stops it when ctx ends.
+func (v *VU) run(ctx context.Context, fn goja.Callable, args ...goja.Value) (goja.Value, error) {
 	v.vm.ClearInterrupt()
 	v.ctx = ctx
+	v.http.ResetCookies()
 
 	done := make(chan struct{})
 	defer close(done)
@@ -857,21 +1039,21 @@ func (v *VU) Iteration(ctx context.Context) error {
 		}()
 	}
 
-	_, err := v.fn(goja.Undefined())
+	res, err := fn(goja.Undefined(), args...)
 	if err == nil {
-		return nil
+		return res, nil
 	}
 
 	var interrupted *goja.InterruptedError
 	if errors.As(err, &interrupted) {
-		return fmt.Errorf("js: %w", ctx.Err())
+		return nil, fmt.Errorf("js: %w", ctx.Err())
 	}
 
 	var jsErr *goja.Exception
 	if errors.As(err, &jsErr) {
-		return fmt.Errorf("js: %s", jsErr.Value().String())
+		return nil, fmt.Errorf("js: %s", jsErr.Value().String())
 	}
-	return fmt.Errorf("js: %w", err)
+	return nil, fmt.Errorf("js: %w", err)
 }
 
 // Close releases v's resources: the VU's HTTP client's idle connections

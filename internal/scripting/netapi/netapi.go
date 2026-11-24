@@ -27,6 +27,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"slices"
 	"strings"
@@ -232,6 +233,10 @@ type HTTPClient struct {
 	noReuse   bool
 	noIDFold  bool
 	transport *http.Transport
+	// jar keeps the cookies servers set, and sends them back on later
+	// calls. It is nil with NoCookies.
+	noCookies bool
+	jar       http.CookieJar
 
 	// insecure is the pool for calls with InsecureSkipVerify, made on
 	// the first such call and reused after it.
@@ -257,6 +262,23 @@ func NoConnectionReuse() HTTPOption { return func(c *HTTPClient) { c.noReuse = t
 // NoURLGrouping keeps a call's path as it is in its report row, instead of
 // replacing the parts that look like ids with {id} (-no-url-grouping).
 func NoURLGrouping() HTTPOption { return func(c *HTTPClient) { c.noIDFold = true } }
+
+// NoCookies turns the cookie jar off (-no-cookies): a cookie a server sets
+// is not sent back unless the script sends it itself.
+func NoCookies() HTTPOption { return func(c *HTTPClient) { c.noCookies = true } }
+
+// ResetCookies forgets every cookie the jar holds. A VU calls it at the
+// start of each iteration, so each iteration is one user's session.
+func (c *HTTPClient) ResetCookies() {
+	if c != nil && !c.noCookies {
+		c.jar = newJar()
+	}
+}
+
+func newJar() http.CookieJar {
+	jar, _ := cookiejar.New(nil) // only options can make it fail
+	return jar
+}
 
 // RowName is the report row of a call to rawURL, after its method:
 // opts.Name, else opts.Group, else the URL's path with the parts that look
@@ -295,6 +317,7 @@ func NewHTTPClient(check SafetyCheck, timeout time.Duration, opts ...HTTPOption)
 		opt(c)
 	}
 	c.transport = c.newTransport(nil)
+	c.ResetCookies()
 	return c
 }
 
@@ -385,8 +408,10 @@ func (c *HTTPClient) Do(ctx context.Context, method, rawURL string, body []byte,
 		Transport:     transport,
 		Timeout:       timeout,
 		CheckRedirect: c.redirectPolicy(opts.Redirects),
+		Jar:           c.jar,
 	}
 
+	req, fb := protocol.TraceFirstByte(req)
 	start := time.Now()
 	resp, err := client.Do(req)
 	if err != nil {
@@ -400,7 +425,9 @@ func (c *HTTPClient) Do(ctx context.Context, method, rawURL string, body []byte,
 	if callErr == nil {
 		callErr = statusFailure(resp.StatusCode, opts.ExpectedStatuses)
 	}
-	c.recordHTTP(ctx, row, time.Since(start), callErr, int64(len(body)), int64(len(data)))
+	if c.recordHTTP(ctx, row, time.Since(start), callErr, int64(len(body)), int64(len(data))) && fb.TTFB() > 0 {
+		c.calls.RecordMeasure("http", protocol.TTFBMeasure, fb.TTFB())
+	}
 	if err != nil {
 		return nil, fmt.Errorf("netapi: reading response body: %w", err)
 	}
@@ -412,15 +439,17 @@ func (c *HTTPClient) Do(ctx context.Context, method, rawURL string, body []byte,
 	}, nil
 }
 
-// recordHTTP counts one call under its row, such as "GET /users/{id}".
-func (c *HTTPClient) recordHTTP(ctx context.Context, row string, d time.Duration, err error, sent, received int64) {
+// recordHTTP counts one call under its row, such as "GET /users/{id}", and
+// reports whether it did.
+func (c *HTTPClient) recordHTTP(ctx context.Context, row string, d time.Duration, err error, sent, received int64) bool {
 	if c == nil || c.calls == nil {
-		return
+		return false
 	}
 	if err != nil && RunEnded(ctx) {
-		return
+		return false
 	}
 	c.calls.RecordCall("http", row, d, err, sent, received)
+	return true
 }
 
 // defaultMaxRedirects is how many redirects net/http follows when a call

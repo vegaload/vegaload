@@ -63,6 +63,7 @@ func (c ConstantArrivalRate) Run(ctx context.Context, iter IterationFunc, rec Re
 	defer ticker.Stop()
 
 	tr, _ := rec.(IterationTracker)
+	vt := vuTracking(rec)
 	sem := make(chan struct{}, maxVUs)
 	var wg sync.WaitGroup
 	nextVUID := 0
@@ -78,9 +79,11 @@ func (c ConstantArrivalRate) Run(ctx context.Context, iter IterationFunc, rec Re
 				nextVUID++
 				id := nextVUID
 				wg.Add(1)
+				vt.VUStarted()
 				go func() {
 					defer wg.Done()
 					defer func() { <-sem }()
+					defer vt.VUStopped()
 					start := time.Now()
 					if tr != nil {
 						tr.Begin(start)

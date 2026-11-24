@@ -88,7 +88,7 @@ set its own with `timeout`, and also takes `redirects` and `params`. See
 
 Each failed request has a reason: `timeout`, `status 503` (the status it
 got), `connection refused`, `connection reset`, `dns`, `tls` or `error`. The
-summary prints them as `failures:`, and the JSON has them as `failure_reasons`.
+summary prints them as `failures:`, and the JSON has them as `failure_reasons`. The JSON also groups them by kind in `errors`, each with the message of the first failure of that kind (masked and without `-secret-env` values).
 
 ## Groups
 
@@ -112,6 +112,86 @@ with group("checkout"):
 Each HTTP call inside is reported as `METHOD checkout`, unless the call has its own `name` or uses `http.url`. When groups nest, the innermost one names the calls. Calls over other protocols keep their own names.
 
 A group is timed like a step: it is in the steps table, and `-threshold 'p95{step="checkout"} < 500ms'` gates it. A group that throws (or raises) fails like a step. See [Endpoint rows](/guides/http#endpoint-rows) and [Steps](/guides/thresholds#steps).
+
+## Think time
+
+`sleep(seconds)` waits, the way a person pauses between pages. `sleep(min, max)` waits a random time between the two. Seconds may have a fraction. Both JavaScript and Python have it:
+
+```js
+http.get(base + "/products");
+sleep(2.5);
+http.get(base + "/products/42");
+sleep(1, 3);
+```
+
+```python
+http.get(base + "/products")
+sleep(2.5)
+```
+
+A sleep is not a call, so it is in no call's latency. It is part of the iteration's time, and of the step or group around it. A sleeping VU wakes as soon as the run ends. A negative time, or a `min` above `max`, is an error the script can catch.
+
+## Cookies
+
+Each VU has a cookie jar. A cookie a server sets is sent back on that VU's later calls. The jar is emptied at the start of each iteration, so each iteration is one user's session. `-no-cookies` turns the jar off. A script can still send a `Cookie` header itself.
+
+## Setup and teardown
+
+`setup()` runs once, before the load. What it returns is given to every iteration and to `teardown()`, which runs once after the load:
+
+```js
+export function setup() {
+  const r = http.post(base + "/login", { body: JSON.stringify({ user: "load" }) });
+  return { token: r.json().token };
+}
+
+export default function (data) {
+  http.get(base + "/orders", { headers: { Authorization: "Bearer " + data.token } });
+}
+
+export function teardown(data) {
+  http.post(base + "/logout", { headers: { Authorization: "Bearer " + data.token } });
+}
+```
+
+```python
+def setup():
+    r = http.post(base + "/login", body='{"user": "load"}')
+    return {"token": r.json()["token"]}
+
+def iteration(data):
+    http.get(base + "/orders", headers={"Authorization": "Bearer " + data["token"]})
+
+def teardown(data):
+    http.post(base + "/logout", headers={"Authorization": "Bearer " + data["token"]})
+```
+
+In Python, `def iteration():` without a parameter still works. The value setup returns must be one JSON can hold. Each VU gets its own copy.
+
+- setup runs on a VU of its own. Its calls and teardown's are not part of the run's numbers.
+- A setup that fails stops the run with exit code 1. A teardown that fails is a warning in the result.
+- The run's clock, and the live view, start after setup finishes.
+- teardown runs after the load ends, also when `-abort-on-breach` or Ctrl-C stopped it. A second Ctrl-C quits at once.
+- setup and teardown each have a minute, or `-timeout` if that is longer.
+- `vegaload validate` runs setup, one iteration with its data, then teardown.
+
+## Options in the file
+
+A scenario can carry its own load shape, so one file holds the whole test:
+
+```js
+export const options = {
+  executor: "ramp",
+  stages: [{ target: 20, duration: "1m" }, { target: 0, duration: "10s" }],
+  thresholds: ["p95 < 300ms", "error_rate < 1%"],
+};
+```
+
+```python
+options = {"vus": 10, "duration": "30s", "thresholds": ["p95 < 300ms"]}
+```
+
+The keys are `executor`, `vus`, `duration`, `stages`, `rate`, `maxVUs` (`max_vus` in Python), `timeout` and `thresholds`. Each one does what the run flag of the same name does. Durations are text, like `"30s"`. `stages` is a list of `{target, duration}`, or the `-stages` text. `thresholds` is a list of threshold expressions. A flag on the command line wins over the option. An unknown key is an error that lists the keys. The options are read from the script's top-level code, which must not make calls.
 
 ## Call other protocols from a scenario
 

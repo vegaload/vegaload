@@ -928,6 +928,8 @@ set its own with `timeout`, and also takes `redirects` and `params`. See
 Each failed request has a reason: `timeout`, `status 503` (the status it
 got), `connection refused`, `connection reset`, `dns`, `tls` or `error`. The
 summary prints them as `failures:`, and the JSON has them as `failure_reasons`.
+The JSON also groups them by kind in `errors`, each with the message of the
+first failure of that kind (masked and without `-secret-env` values).
 
 ### Request options
 
@@ -1022,6 +1024,86 @@ with group("checkout"):
 Each HTTP call inside is reported as `METHOD checkout`, unless the call has its own `name` or uses `http.url`. When groups nest, the innermost one names the calls. Calls over other protocols keep their own names.
 
 A group is timed like a step: it is in the steps table, and `-threshold 'p95{step="checkout"} < 500ms'` gates it. A group that throws (or raises) fails like a step. See [Endpoint rows](#endpoint-rows) and [Steps](#steps).
+
+### Think time
+
+`sleep(seconds)` waits, the way a person pauses between pages. `sleep(min, max)` waits a random time between the two. Seconds may have a fraction. Both JavaScript and Python have it:
+
+```js
+http.get(base + "/products");
+sleep(2.5);
+http.get(base + "/products/42");
+sleep(1, 3);
+```
+
+```python
+http.get(base + "/products")
+sleep(2.5)
+```
+
+A sleep is not a call, so it is in no call's latency. It is part of the iteration's time, and of the step or group around it. A sleeping VU wakes as soon as the run ends. A negative time, or a `min` above `max`, is an error the script can catch.
+
+### Cookies
+
+Each VU has a cookie jar. A cookie a server sets is sent back on that VU's later calls. The jar is emptied at the start of each iteration, so each iteration is one user's session. `-no-cookies` turns the jar off. A script can still send a `Cookie` header itself.
+
+### Setup and teardown
+
+`setup()` runs once, before the load. What it returns is given to every iteration and to `teardown()`, which runs once after the load:
+
+```js
+export function setup() {
+  const r = http.post(base + "/login", { body: JSON.stringify({ user: "load" }) });
+  return { token: r.json().token };
+}
+
+export default function (data) {
+  http.get(base + "/orders", { headers: { Authorization: "Bearer " + data.token } });
+}
+
+export function teardown(data) {
+  http.post(base + "/logout", { headers: { Authorization: "Bearer " + data.token } });
+}
+```
+
+```python
+def setup():
+    r = http.post(base + "/login", body='{"user": "load"}')
+    return {"token": r.json()["token"]}
+
+def iteration(data):
+    http.get(base + "/orders", headers={"Authorization": "Bearer " + data["token"]})
+
+def teardown(data):
+    http.post(base + "/logout", headers={"Authorization": "Bearer " + data["token"]})
+```
+
+In Python, `def iteration():` without a parameter still works. The value setup returns must be one JSON can hold. Each VU gets its own copy.
+
+- setup runs on a VU of its own. Its calls and teardown's are not part of the run's numbers.
+- A setup that fails stops the run with exit code 1. A teardown that fails is a warning in the result.
+- The run's clock, and the live view, start after setup finishes.
+- teardown runs after the load ends, also when `-abort-on-breach` or Ctrl-C stopped it. A second Ctrl-C quits at once.
+- setup and teardown each have a minute, or `-timeout` if that is longer.
+- `vegaload validate` runs setup, one iteration with its data, then teardown.
+
+### Options in the file
+
+A scenario can carry its own load shape, so one file holds the whole test:
+
+```js
+export const options = {
+  executor: "ramp",
+  stages: [{ target: 20, duration: "1m" }, { target: 0, duration: "10s" }],
+  thresholds: ["p95 < 300ms", "error_rate < 1%"],
+};
+```
+
+```python
+options = {"vus": 10, "duration": "30s", "thresholds": ["p95 < 300ms"]}
+```
+
+The keys are `executor`, `vus`, `duration`, `stages`, `rate`, `maxVUs` (`max_vus` in Python), `timeout` and `thresholds`. Each one does what the run flag of the same name does. Durations are text, like `"30s"`. `stages` is a list of `{target, duration}`, or the `-stages` text. `thresholds` is a list of threshold expressions. A flag on the command line wins over the option. An unknown key is an error that lists the keys. The options are read from the script's top-level code, which must not make calls.
 
 ### Call other protocols from a scenario
 
@@ -1232,6 +1314,27 @@ one of the first page you opened in the recording. Use `-include-static`,
 `-include-third-party` or `-host` to change that, and `-max N` to stop after
 N requests.
 
+Each page of the recording is a `group()`, so the steps table has one row
+per page. Each call gets a `name` with its path, and `{id}` for a part that
+looks like an id, so its endpoint row is the same on every run, such as
+`GET /api/products/{id}`. The waits between requests become `sleep()`
+calls. `-think-time` says how:
+
+- `recorded` (the default): the time from the end of one kept request to
+  the start of the next. A request that was left out does not shorten it.
+- `capped:5s`: as recorded, but at most 5 seconds.
+- `fixed:1s`: 1 second before each request but the first.
+- `none`: no sleeps.
+
+A wait under 10 ms is not written. Sleep time is not in any call's latency.
+
+```
+./vegaload import har -think-time capped:5s recording.har -o checkout.vl.js
+```
+
+A multipart form is rebuilt from the fields in the recording, with its own
+boundary and a `multipart()` helper in the file.
+
 The importer keeps the secrets it can recognise out of the file as
 `env.VL_NAME`. You pass each one by name with `-secret-env`. That covers a
 password, an API key, a session id, and any header, query parameter or body
@@ -1256,11 +1359,14 @@ Some things are left for you, and the file marks them with `TODO` lines:
   not used. A password or an API key stays in the environment even if a
   response echoes it. A CSRF token or a view state is carried when the page
   returned it, and stays in the file with a `TODO` when it did not.
-- A multipart body. It is left out.
-- Waits between requests. A scenario has no sleep and no cookie jar. A
-  cookie an earlier response set is carried. Any other cookie is a secret.
-  In a script, `Set-Cookie` is every cookie the response set, separated by
-  newlines, so a date in `Expires` stays intact.
+- A file in a multipart form whose content is not in the recording. It
+  gets a placeholder value.
+
+The cookie jar sends back the cookies a server set. A cookie an earlier
+response set is also copied into the `Cookie` header, so the scenario works
+with `-no-cookies` too. Any other cookie is a secret. In a script,
+`Set-Cookie` is every cookie the response set, separated by newlines, so a
+date in `Expires` stays intact.
 
 The hosts in the file are real. A host that is not localhost needs
 `-allow-target` on the run, and the file's first lines say which.
@@ -1277,8 +1383,10 @@ missing file, no `iteration()` in Python) and an iteration that fails (a
 wrong URL, a thrown error, a host that is not allowed). It makes real
 network calls, under the same host rules as `run`, so a host that is not
 localhost needs `-allow-target` or `-yes`. Any `check()` results are listed,
-and a failed check does not make the scenario invalid. Add `-output json`
-for a machine-readable result.
+and a failed check does not make the scenario invalid. A scenario with
+`setup` and `teardown` runs setup, the one iteration with what setup
+returned, then teardown. Options the run would refuse make the scenario not
+valid. Add `-output json` for a machine-readable result.
 
 | Exit code | Meaning                          |
 |-----------|----------------------------------|
@@ -1287,8 +1395,8 @@ for a machine-readable result.
 | 2         | Bad usage                        |
 
 From an agent, the `validate_scenario` tool does the same and returns
-`valid`, and for an invalid scenario the `stage` (`load` or `iteration`) and
-`error`.
+`valid`, and for an invalid scenario the `stage` (`load`, `setup`,
+`iteration` or `teardown`) and `error`.
 
 ### Feed a scenario data and settings
 
@@ -1428,9 +1536,12 @@ The merged report is the same as one run of all the load would give.
 Percentiles from several machines cannot be averaged. So each report carries
 a latency histogram, and `merge` adds the histograms up and works every
 percentile out again from the sum. It also adds the totals, failed requests,
-failure reasons and dropped iterations; the iterations, steps, checks,
-protocols, operations and measures, matched by name; and the bytes sent and
-received. Bytes per second is worked out from the merged run's length.
+failure reasons, errors by kind and dropped iterations; the iterations started
+and completed, and the peak and most VUs, since each machine ran its own VUs;
+the time to first byte, from its histograms like the latency; the iterations,
+steps, checks, protocols, operations and measures, matched by name; and the
+bytes sent and received. Bytes per second is worked out from the merged run's
+length.
 
 Min and max are the smallest and largest of any report. The mean is exact.
 The merged run starts at the earliest start and ends at the latest end. The
@@ -1860,6 +1971,149 @@ A flag wins over its variable. From an agent, `run_test` takes `live`,
 `no-live`, `no-open`, `stream_file`, `stream_push`, `run_id` and `labels`
 (there is no argument for the token or `-stream-insecure`). The first text item
 of its answer stays the result JSON; `live view: URL` comes as a second item.
+
+## Serve the live numbers at /stats
+
+`-stats-addr` starts a small HTTP server for the length of the run. Anything
+that can read JSON over HTTP can watch the run from it: a dashboard, a script,
+or a Harness load test runner.
+
+```
+vegaload run -vus 5 -duration 10m -stats-addr 127.0.0.1:9093 checkout.vl.js
+```
+
+The run prints the address on stderr:
+
+```
+stats: http://127.0.0.1:9093/stats
+```
+
+Read it as often as you like:
+
+```
+curl -s http://127.0.0.1:9093/stats
+```
+
+```json
+{
+  "totalRequests": 1100,
+  "totalFailures": 563,
+  "avgResponseMs": 20.157,
+  "p50Ms": 19.896,
+  "p95Ms": 55.429,
+  "p99Ms": 60.769,
+  "errorRate": 51.182,
+  "avgRps": 109.987,
+  "iterations": 545,
+  "latencyHist": {"0": 546, "76": 3, "77": 12},
+  "latencyHistParams": {"baseMs": 0.5, "growth": 1.05},
+  "requestStats": {
+    "POST:/widgets": {
+      "name": "/widgets",
+      "method": "POST",
+      "numRequests": 550,
+      "numFailures": 13,
+      "avgResponseMs": 40.155,
+      "minResponseMs": 20.288,
+      "maxResponseMs": 60.769,
+      "p50Ms": 41.362,
+      "p95Ms": 58.2,
+      "p99Ms": 60.769,
+      "requestsPerSec": 54.994,
+      "avgSizeBytes": 23.909,
+      "latencyHist": {"76": 3, "77": 11}
+    }
+  },
+  "checkStats": {
+    "status is 201": {"name": "status is 201", "passes": 537, "fails": 13}
+  },
+  "currentUsers": 0,
+  "peakUsers": 5,
+  "runDurationSec": 10.001,
+  "dataSentBytes": 7700,
+  "dataReceivedBytes": 23600,
+  "avgLatencyMs": 20.135,
+  "p50LatencyMs": 19.896,
+  "p95LatencyMs": 55.429,
+  "p99LatencyMs": 60.754,
+  "state": "finished",
+  "maxUsers": 5,
+  "iterationsStarted": 550,
+  "iterationsCompleted": 545,
+  "droppedIterations": 0,
+  "errors": {
+    "status 404": {"kind": "status 404", "count": 550, "sample": "status 404"},
+    "check failed": {"kind": "check failed", "count": 13, "sample": "status is 201"}
+  },
+  "steps": {
+    "create": {"name": "create", "numRequests": 550, "numFailures": 0, "avgResponseMs": 40.23, "p50Ms": 41.362, "p95Ms": 58.2, "p99Ms": 60.871}
+  }
+}
+```
+
+The example is cut short. A real answer has every row, bucket and kind.
+
+Every number counts from the start of the run, so two reads never go down.
+Times are in milliseconds. `errorRate` is a percentage, so `51.182` is 51.182%.
+The JSON report's `error_rate` is a fraction instead.
+
+| Field | Meaning |
+|-------|---------|
+| `totalRequests`, `totalFailures` | Requests so far, and how many failed. In a scenario run a request is one call the scenario made. |
+| `avgResponseMs`, `p50Ms`, `p95Ms`, `p99Ms` | Latency of the requests. |
+| `avgRps` | Requests per second since the start. |
+| `iterations` | Iterations that completed. |
+| `latencyHist`, `latencyHistParams` | The latency histogram, keyed by bucket number. The buckets are the ones in the JSON report. |
+| `requestStats` | One row per kind of call. An HTTP row is keyed `METHOD:endpoint`, such as `GET:/users/{id}`. A row for another protocol is keyed by the protocol and the operation, such as `ftp roundtrip`. `avgSizeBytes` is the bytes received per call. |
+| `checkStats` | Passes and fails of each `check()`. |
+| `currentUsers`, `peakUsers`, `maxUsers` | VUs running now, the most that ran at once, and the most the load shape allows. |
+| `runDurationSec` | How long the run has gone on. |
+| `dataSentBytes`, `dataReceivedBytes` | Bytes moved by every protocol. |
+| `avgLatencyMs`, `p50LatencyMs`, `p95LatencyMs`, `p99LatencyMs` | Time to first byte of the HTTP calls. |
+| `state` | `starting` until the load begins, then `running`, then `finished`. `failed` means the run stopped with an error. |
+| `iterationsStarted`, `iterationsCompleted`, `droppedIterations` | Iterations that started, ended, and could not start because every VU was busy. |
+| `errors` | The failures by kind, each with one sample message. A password in a URL is masked and every `-secret-env` value is removed. |
+| `steps` | One entry per `step()`. |
+
+The fields up to `checkStats` are the ones the Harness k6 stats sidecar serves.
+The `currentUsers` to `p99LatencyMs` fields are the ones its JMeter sidecar
+adds. A reader that does not know a field ignores it.
+
+`/healthz` answers `{"ok":true}`. Any other path is a 404. A method other than
+`GET` or `HEAD` is a 405.
+
+The server stops when the run ends. A reader that polls every few seconds can
+miss the last numbers. `-stats-linger` keeps them up a little longer:
+
+```
+vegaload run -vus 5 -duration 10m -stats-addr 127.0.0.1:9093 -stats-linger 30s checkout.vl.js
+```
+
+```
+stats: serving the final numbers at http://127.0.0.1:9093/stats for 30s (Ctrl-C to stop)
+```
+
+`state` is then `finished`, and `currentUsers` is 0. Ctrl-C stops the wait
+early. The exit code is the run's own.
+
+`127.0.0.1:9093` listens on this machine only. `:9093` listens on every
+interface, so other machines on the network can read the numbers. Use it in a
+container or a pod, where the reader is next to the run. The endpoint has no
+password, so do not open it to a network you do not trust.
+
+The server only answers. VegaLoad sends nothing anywhere because of it. The
+answer holds the run's numbers, step, check and endpoint names, and error
+samples. It never holds headers, bodies, options or environment values.
+
+If the address is taken, the run does not start. It exits 2:
+
+```
+vegaload run: -stats-addr: listen tcp 127.0.0.1:9093: bind: address already in use
+```
+
+`-stats-addr` works with the live view and with `-stream-file` and
+`-stream-push`. They are separate: turning one off does not turn off the
+others.
 
 ## Supported protocols
 
