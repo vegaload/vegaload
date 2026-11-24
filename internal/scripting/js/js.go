@@ -40,6 +40,7 @@
 package js
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -48,6 +49,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -56,6 +58,7 @@ import (
 
 	"github.com/vegaload/vegaload/internal/scripting/netapi"
 	"github.com/vegaload/vegaload/internal/secrets"
+	"github.com/vegaload/vegaload/internal/urlname"
 )
 
 // Script is a loaded, compiled scenario file, ready to be instantiated
@@ -158,6 +161,13 @@ type VU struct {
 
 	// httpOpts are how NewVU builds http, set by Options.
 	httpOpts []netapi.HTTPOption
+
+	// groups are the names of the group() calls running now, innermost
+	// last. The innermost one names the HTTP calls made inside it.
+	groups []string
+	// urlKey marks the value http.url returns, so http.* can tell it from
+	// any other object.
+	urlKey *goja.Symbol
 }
 
 // SetCheckRecorder sets where this VU reports the outcome of every
@@ -193,6 +203,13 @@ func WithNoConnectionReuse() Option {
 	return func(v *VU) { v.httpOpts = append(v.httpOpts, netapi.NoConnectionReuse()) }
 }
 
+// WithNoURLGrouping keeps each http call's path as it is in its report row,
+// instead of replacing the parts that look like ids with {id}
+// (-no-url-grouping).
+func WithNoURLGrouping() Option {
+	return func(v *VU) { v.httpOpts = append(v.httpOpts, netapi.NoURLGrouping()) }
+}
+
 // NewVU creates a fresh VU from the script: a new runtime, the script's
 // top-level code run once (so top-level state like a counter declared
 // with let/const starts fresh for this VU), its default export resolved
@@ -217,6 +234,7 @@ func (s *Script) NewVU(check netapi.SafetyCheck, timeout time.Duration, opts ...
 		proto:       netapi.NewProtoClient(check, timeout),
 		safetyCheck: check,
 		timeout:     timeout,
+		urlKey:      goja.NewSymbol("vegaload.url"),
 	}
 	for _, opt := range opts {
 		opt(v)
@@ -252,6 +270,9 @@ func (s *Script) NewVU(check netapi.SafetyCheck, timeout time.Duration, opts ...
 		return nil, fmt.Errorf("js: %w", err)
 	}
 	if err := vm.Set("step", v.newStepFunc(vm)); err != nil {
+		return nil, fmt.Errorf("js: %w", err)
+	}
+	if err := vm.Set("group", v.newGroupFunc(vm)); err != nil {
 		return nil, fmt.Errorf("js: %w", err)
 	}
 	if err := vm.Set("env", v.newEnvGlobal(vm)); err != nil {
@@ -408,27 +429,57 @@ func (v *VU) newCheckFunc(vm *goja.Runtime) func(goja.FunctionCall) goja.Value {
 // nest; each is recorded on its own.
 func (v *VU) newStepFunc(vm *goja.Runtime) func(goja.FunctionCall) goja.Value {
 	return func(call goja.FunctionCall) goja.Value {
-		nameV := call.Argument(0)
-		fn, isFn := goja.AssertFunction(call.Argument(1))
-		if goja.IsUndefined(nameV) || goja.IsNull(nameV) || nameV.String() == "" || !isFn {
-			throw(vm, fmt.Errorf("step: want step(name, fn)"))
-		}
-		name := nameV.String()
-		start := time.Now()
-		res, err := fn(goja.Undefined())
-		d := time.Since(start)
-		if v.steps != nil && !(err != nil && netapi.RunEnded(v.ctx)) {
-			v.steps.RecordStep(name, d, err != nil)
-		}
-		if err != nil {
-			// Re-raise the original exception unchanged.
-			if ex, ok := err.(*goja.Exception); ok {
-				panic(ex.Value())
-			}
-			panic(vm.NewGoError(err))
-		}
-		return res
+		name, fn := stepArgs(vm, call, "step")
+		return v.runStep(vm, name, fn)
 	}
+}
+
+// newGroupFunc builds the group(name, fn) global. A group is a step that
+// also names the HTTP calls made inside it: each is recorded under the row
+// "METHOD name" unless the call gives its own name. The innermost group
+// wins.
+func (v *VU) newGroupFunc(vm *goja.Runtime) func(goja.FunctionCall) goja.Value {
+	return func(call goja.FunctionCall) goja.Value {
+		name, fn := stepArgs(vm, call, "group")
+		v.groups = append(v.groups, name)
+		defer func() { v.groups = v.groups[:len(v.groups)-1] }()
+		return v.runStep(vm, name, fn)
+	}
+}
+
+func stepArgs(vm *goja.Runtime, call goja.FunctionCall, what string) (string, goja.Callable) {
+	nameV := call.Argument(0)
+	fn, isFn := goja.AssertFunction(call.Argument(1))
+	if goja.IsUndefined(nameV) || goja.IsNull(nameV) || nameV.String() == "" || !isFn {
+		throw(vm, fmt.Errorf("%s: want %s(name, fn)", what, what))
+	}
+	return nameV.String(), fn
+}
+
+// runStep runs fn, times it, and records it as the step name.
+func (v *VU) runStep(vm *goja.Runtime, name string, fn goja.Callable) goja.Value {
+	start := time.Now()
+	res, err := fn(goja.Undefined())
+	d := time.Since(start)
+	if v.steps != nil && !(err != nil && netapi.RunEnded(v.ctx)) {
+		v.steps.RecordStep(name, d, err != nil)
+	}
+	if err != nil {
+		// Re-raise the original exception unchanged.
+		if ex, ok := err.(*goja.Exception); ok {
+			panic(ex.Value())
+		}
+		panic(vm.NewGoError(err))
+	}
+	return res
+}
+
+// group is the innermost group() running now, or "".
+func (v *VU) group() string {
+	if len(v.groups) == 0 {
+		return ""
+	}
+	return v.groups[len(v.groups)-1]
 }
 
 // throw raises err as a catchable JS exception (a Go Error instance
@@ -443,17 +494,19 @@ func throw(vm *goja.Runtime, err error) {
 
 // requestOptions is the shape of the optional second argument to every
 // http.* method and ws.connect: `{ headers, body, insecure,
-// expectedStatuses, timeout, redirects, params }`. All fields are
+// expectedStatuses, timeout, redirects, params, name }`. All fields are
 // optional; a caller that passes no options object at all gets the zero
 // value. expectedStatuses is read by parseExpectedStatuses, not by the
 // field mapper, so that a number that is not whole is refused instead of
 // rounded. timeout (a number of milliseconds, or a duration string such as
 // "5s"), redirects and params are read by netapi's parsers, the same ones
-// Python uses; ws.connect ignores them.
+// Python uses; ws.connect ignores them. name is the call's report row,
+// after its method.
 type requestOptions struct {
 	Headers          map[string]string `json:"headers"`
 	Body             string            `json:"body"`
 	Insecure         bool              `json:"insecure"`
+	Name             string            `json:"-"`
 	ExpectedStatuses []int             `json:"-"`
 	Timeout          time.Duration     `json:"-"`
 	Redirects        *int              `json:"-"`
@@ -486,6 +539,13 @@ func parseOptions(vm *goja.Runtime, call goja.FunctionCall, argIndex int) reques
 	}
 	if opts.Params, err = netapi.ParseParams(exportOption(obj.Get("params"))); err != nil {
 		throw(vm, fmt.Errorf("js: params: %w", err))
+	}
+	switch n := exportOption(obj.Get("name")).(type) {
+	case nil:
+	case string:
+		opts.Name = n
+	default:
+		throw(vm, fmt.Errorf("js: name: want a string, like \"/users/{id}\", not %v", obj.Get("name")))
 	}
 	return opts
 }
@@ -543,9 +603,9 @@ func (v *VU) newHTTPGlobal(vm *goja.Runtime) *goja.Object {
 			if len(call.Arguments) < 1 {
 				throw(vm, errors.New("js: http."+strings.ToLower(method)+"(url[, options]) requires a url argument"))
 			}
-			url := call.Arguments[0].String()
+			url, urlName := v.urlArg(call.Arguments[0])
 			opts := parseOptions(vm, call, 1)
-			return v.doHTTPRequest(vm, method, url, opts)
+			return v.doHTTPRequest(vm, method, url, urlName, opts)
 		}
 	}
 
@@ -560,12 +620,69 @@ func (v *VU) newHTTPGlobal(vm *goja.Runtime) *goja.Object {
 			throw(vm, errors.New("js: http.request(method, url[, options]) requires method and url arguments"))
 		}
 		method := call.Arguments[0].String()
-		url := call.Arguments[1].String()
+		url, urlName := v.urlArg(call.Arguments[1])
 		opts := parseOptions(vm, call, 2)
-		return v.doHTTPRequest(vm, method, url, opts)
+		return v.doHTTPRequest(vm, method, url, urlName, opts)
 	})
+	_ = h.Set("url", v.newURLFunc(vm))
 
 	return h
+}
+
+// taggedURL is what http.url returns, kept under VU.urlKey.
+type taggedURL struct {
+	url, name string
+}
+
+// newURLFunc builds http.url, a tagged template:
+//
+//	http.get(http.url`https://api.test/users/${id}`)
+//
+// The value it returns is accepted by http.* in place of a URL string, and
+// names the call's report row after the template, "/users/${}", so every
+// id shares one row. String() of it is the URL.
+func (v *VU) newURLFunc(vm *goja.Runtime) func(goja.FunctionCall) goja.Value {
+	return func(call goja.FunctionCall) goja.Value {
+		strs, ok := call.Argument(0).(*goja.Object)
+		if !ok || strs.ClassName() != "Array" {
+			throw(vm, errors.New("js: http.url is a tagged template: http.url`https://api.test/users/${id}`"))
+		}
+		raw, _ := strs.Get("raw").(*goja.Object)
+		n := int(strs.Get("length").ToInteger())
+		parts := make([]string, n)
+		for i := range parts {
+			s := strs.Get(strconv.Itoa(i))
+			if (s == nil || goja.IsUndefined(s)) && raw != nil {
+				s = raw.Get(strconv.Itoa(i))
+			}
+			if s != nil && !goja.IsUndefined(s) {
+				parts[i] = s.String()
+			}
+		}
+		values := make([]string, max(n-1, 0))
+		for i := range values {
+			values[i] = call.Argument(i + 1).String()
+		}
+		u, name := urlname.Template(parts, values)
+		obj := vm.NewObject()
+		_ = obj.Set("url", u)
+		_ = obj.Set("toString", func(goja.FunctionCall) goja.Value { return vm.ToValue(u) })
+		_ = obj.DefineDataPropertySymbol(v.urlKey, vm.ToValue(&taggedURL{url: u, name: name}), goja.FLAG_FALSE, goja.FLAG_FALSE, goja.FLAG_FALSE)
+		return obj
+	}
+}
+
+// urlArg reads the URL argument of an http call: a string, or the value of
+// http.url, which also names the call's row.
+func (v *VU) urlArg(arg goja.Value) (url, name string) {
+	if obj, ok := arg.(*goja.Object); ok {
+		if mark := obj.GetSymbol(v.urlKey); mark != nil {
+			if tu, ok := mark.Export().(*taggedURL); ok {
+				return tu.url, tu.name
+			}
+		}
+	}
+	return arg.String(), ""
 }
 
 // ScriptHTTPMethods are the functions on the http global, in both
@@ -580,7 +697,9 @@ func ScriptWSMethods() []string {
 	return []string{"connect", "send", "receive", "close"}
 }
 
-func (v *VU) doHTTPRequest(vm *goja.Runtime, method, url string, opts requestOptions) goja.Value {
+// doHTTPRequest makes one call. Its row is named by the name option, else
+// urlName (from http.url), else the innermost group, else the URL's path.
+func (v *VU) doHTTPRequest(vm *goja.Runtime, method, url, urlName string, opts requestOptions) goja.Value {
 	if v.ctx == nil {
 		throw(vm, errors.New("js: http call made outside of an iteration"))
 	}
@@ -595,6 +714,8 @@ func (v *VU) doHTTPRequest(vm *goja.Runtime, method, url string, opts requestOpt
 		Timeout:            opts.Timeout,
 		Redirects:          opts.Redirects,
 		Params:             opts.Params,
+		Name:               cmp.Or(opts.Name, urlName),
+		Group:              v.group(),
 	})
 	if err != nil {
 		throw(vm, err)

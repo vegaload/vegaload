@@ -38,6 +38,7 @@ import (
 	"github.com/vegaload/vegaload/internal/failure"
 	"github.com/vegaload/vegaload/internal/protocol"
 	"github.com/vegaload/vegaload/internal/urlerr"
+	"github.com/vegaload/vegaload/internal/urlname"
 )
 
 // RunEnded reports whether the run is over: ctx is done, or its deadline
@@ -140,6 +141,12 @@ type Options struct {
 	// Params are query parameters added to the URL of this HTTP call,
 	// after any query the URL already has. Read them with ParseParams.
 	Params url.Values
+	// Name is the report row of this HTTP call, after its method: the
+	// script's name option, or the name of an http.url template. Empty
+	// means Group, or else the URL's path (see HTTPClient.RowName).
+	Name string
+	// Group is the innermost group() this HTTP call ran in, or "".
+	Group string
 	// Recorder counts a WebSocket connect. Scripts do not set it. HTTP
 	// uses the recorder on HTTPClient instead.
 	Recorder CallRecorder
@@ -223,6 +230,7 @@ type HTTPClient struct {
 	timeout   time.Duration
 	calls     CallRecorder
 	noReuse   bool
+	noIDFold  bool
 	transport *http.Transport
 
 	// insecure is the pool for calls with InsecureSkipVerify, made on
@@ -245,6 +253,27 @@ type HTTPOption func(*HTTPClient)
 // NoConnectionReuse closes each connection after one call, so every call
 // opens a new one (-no-connection-reuse).
 func NoConnectionReuse() HTTPOption { return func(c *HTTPClient) { c.noReuse = true } }
+
+// NoURLGrouping keeps a call's path as it is in its report row, instead of
+// replacing the parts that look like ids with {id} (-no-url-grouping).
+func NoURLGrouping() HTTPOption { return func(c *HTTPClient) { c.noIDFold = true } }
+
+// RowName is the report row of a call to rawURL, after its method:
+// opts.Name, else opts.Group, else the URL's path with the parts that look
+// like ids replaced by {id} (unless NoURLGrouping).
+func (c *HTTPClient) RowName(rawURL string, opts Options) string {
+	switch {
+	case opts.Name != "":
+		return opts.Name
+	case opts.Group != "":
+		return opts.Group
+	}
+	p := urlname.Path(rawURL)
+	if c == nil || !c.noIDFold {
+		p = urlname.Fold(p)
+	}
+	return p
+}
 
 // SetCallRecorder counts this client's HTTP calls. Nil means not counted.
 func (c *HTTPClient) SetCallRecorder(r CallRecorder) {
@@ -319,6 +348,7 @@ func (c *HTTPClient) Do(ctx context.Context, method, rawURL string, body []byte,
 	if opts.Redirects != nil && *opts.Redirects < 0 {
 		return nil, fmt.Errorf("netapi: redirects: want 0 or more, not %d", *opts.Redirects)
 	}
+	row := urlname.Row(method, c.RowName(rawURL, opts))
 	if len(opts.Params) > 0 {
 		var err error
 		if rawURL, err = addParams(rawURL, opts.Params); err != nil {
@@ -360,7 +390,7 @@ func (c *HTTPClient) Do(ctx context.Context, method, rawURL string, body []byte,
 	start := time.Now()
 	resp, err := client.Do(req)
 	if err != nil {
-		c.recordHTTP(ctx, method, time.Since(start), err, int64(len(body)), 0)
+		c.recordHTTP(ctx, row, time.Since(start), err, int64(len(body)), 0)
 		return nil, fmt.Errorf("netapi: %w", err)
 	}
 	defer resp.Body.Close()
@@ -370,7 +400,7 @@ func (c *HTTPClient) Do(ctx context.Context, method, rawURL string, body []byte,
 	if callErr == nil {
 		callErr = statusFailure(resp.StatusCode, opts.ExpectedStatuses)
 	}
-	c.recordHTTP(ctx, method, time.Since(start), callErr, int64(len(body)), int64(len(data)))
+	c.recordHTTP(ctx, row, time.Since(start), callErr, int64(len(body)), int64(len(data)))
 	if err != nil {
 		return nil, fmt.Errorf("netapi: reading response body: %w", err)
 	}
@@ -382,26 +412,15 @@ func (c *HTTPClient) Do(ctx context.Context, method, rawURL string, body []byte,
 	}, nil
 }
 
-func (c *HTTPClient) recordHTTP(ctx context.Context, method string, d time.Duration, err error, sent, received int64) {
+// recordHTTP counts one call under its row, such as "GET /users/{id}".
+func (c *HTTPClient) recordHTTP(ctx context.Context, row string, d time.Duration, err error, sent, received int64) {
 	if c == nil || c.calls == nil {
 		return
 	}
 	if err != nil && RunEnded(ctx) {
 		return
 	}
-	c.calls.RecordCall("http", httpOp(method), d, err, sent, received)
-}
-
-// httpOp keeps the operation set fixed. A verb outside the usual list is
-// OTHER, so a script cannot store an arbitrary string as an operation name.
-func httpOp(method string) string {
-	switch strings.ToUpper(method) {
-	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
-		http.MethodPatch, http.MethodDelete, http.MethodOptions:
-		return strings.ToUpper(method)
-	default:
-		return "OTHER"
-	}
+	c.calls.RecordCall("http", row, d, err, sent, received)
 }
 
 // defaultMaxRedirects is how many redirects net/http follows when a call

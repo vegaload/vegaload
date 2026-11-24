@@ -54,6 +54,7 @@ package python
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -66,6 +67,7 @@ import (
 
 	"github.com/vegaload/vegaload/internal/pyfind"
 	"github.com/vegaload/vegaload/internal/scripting/netapi"
+	"github.com/vegaload/vegaload/internal/urlname"
 )
 
 // pythonBin is the interpreter this package shells out to. It is a
@@ -112,7 +114,7 @@ func findInterpreter() (pyfind.Interpreter, error) {
 // See the package doc comment for a worked example and VU.Iteration for
 // the Go side of this same protocol.
 const harnessTemplate = `
-import sys, json, runpy, itertools, time
+import sys, json, runpy, itertools, time, string
 
 _next_id = itertools.count(1)
 
@@ -184,14 +186,65 @@ def _request_options(timeout, redirects, params):
         out["params"] = params
     return out
 
+class _URL:
+    """What http.url returns: a URL that also names its report row after the
+    template, so http.url("https://api.test/users/{}", 7) is the row
+    /users/${}, the same row a JavaScript http.url template gives."""
+    def __init__(self, template, values):
+        if not isinstance(template, str):
+            raise VegaloadError("http.url: want a template string, like http.url(\"https://api.test/users/{}\", user_id)")
+        parts, vals, literal = [], [], ""
+        rest = list(values)
+        for text, field, spec, conv in string.Formatter().parse(template):
+            literal += text
+            if field is None:
+                continue
+            if field != "":
+                raise VegaloadError("http.url: use {} placeholders, not {%s}" % field)
+            if not rest:
+                raise VegaloadError("http.url: the template has more {} than values")
+            v = rest.pop(0)
+            if conv == "r":
+                v = repr(v)
+            elif conv == "a":
+                v = ascii(v)
+            parts.append(literal)
+            vals.append(format(v, spec or ""))
+            literal = ""
+        parts.append(literal)
+        if rest:
+            raise VegaloadError("http.url: %d more values than {} in the template" % len(rest))
+        self._parts, self._values = parts, vals
+        self.url = "".join(p + v for p, v in zip(parts, vals + [""]))
+
+    def __str__(self):
+        return self.url
+
+    def __repr__(self):
+        return "http.url(%r)" % self.url
+
 class HTTP:
     def request(self, method, url, headers=None, body=None, insecure=False, expected_statuses=None,
-                timeout=None, redirects=None, params=None):
-        result = _call("http", method=method, url=url,
+                timeout=None, redirects=None, params=None, name=None):
+        row = {}
+        if name is not None:
+            if not isinstance(name, str):
+                raise VegaloadError("name: want a string, like \"/users/{id}\"")
+            row["name"] = name
+        if isinstance(url, _URL):
+            row["url_parts"], row["url_values"] = url._parts, url._values
+        if _groups:
+            row["group"] = _groups[-1]
+        result = _call("http", method=method, url=str(url),
                         headers=headers or {}, body=body or "", insecure=bool(insecure),
                         **_expected_statuses(expected_statuses),
-                        **_request_options(timeout, redirects, params))
+                        **_request_options(timeout, redirects, params), **row)
         return HTTPResponse(result)
+
+    def url(self, template, *values):
+        """http.url("https://api.test/users/{}", user_id): a URL whose report
+        row is named after the template, /users/${}. Pass it to any http call."""
+        return _URL(template, values)
 
     def get(self, url, **kw):
         return self.request("GET", url, **kw)
@@ -226,7 +279,7 @@ class WSConn:
 
 class WS:
     def connect(self, url, headers=None, insecure=False):
-        result = _call("ws_connect", url=url, headers=headers or {}, insecure=bool(insecure))
+        result = _call("ws_connect", url=str(url), headers=headers or {}, insecure=bool(insecure))
         return WSConn(result["handle"])
 
 http = HTTP()
@@ -372,9 +425,9 @@ def check(value, tests):
 
 class _Step(object):
     """A named step: a context manager and a decorator-free callable form."""
-    def __init__(self, name):
+    def __init__(self, name, what="step"):
         if not isinstance(name, str) or name == "":
-            raise TypeError("step: want step(name) or step(name, fn)")
+            raise TypeError("%s: want %s(name) or %s(name, fn)" % (what, what, what))
         self._name = name
         self._t0 = None
 
@@ -400,6 +453,34 @@ def step(name, fn=None):
     with s:
         return fn()
 
+_groups = []
+
+class _Group(_Step):
+    """A group is a step that also names the http calls made inside it."""
+    def __init__(self, name):
+        _Step.__init__(self, name, "group")
+
+    def __enter__(self):
+        _groups.append(self._name)
+        return _Step.__enter__(self)
+
+    def __exit__(self, exc_type, exc, tb):
+        _groups.pop()
+        return _Step.__exit__(self, exc_type, exc, tb)
+
+def group(name, fn=None):
+    """group(name) is a context manager: "with group('checkout'):".
+    group(name, fn) runs fn and returns its value. A group is timed like a
+    step, and each http call inside it is reported as "METHOD name" unless
+    the call gives its own name. The innermost group wins."""
+    g = _Group(name)
+    if fn is None:
+        return g
+    if not callable(fn):
+        raise TypeError("group: the second argument must be a function")
+    with g:
+        return fn()
+
 def _respond_ready(ok, error=None):
     msg = {"type": "ready", "ok": ok}
     if error is not None:
@@ -417,7 +498,7 @@ def main():
     try:
         module_globals = runpy.run_path(
             script_path,
-            init_globals={"http": http, "ws": ws, "tcp": tcp, "udp": udp, "mqtt": mqtt, "kafka": kafka, "grpc": grpc, "postgres": postgres, "mysql": mysql, "redis": redis, "rabbitmq": rabbitmq, "ftp": ftp, "sftp": sftp, "check": check, "step": step, "env": env, "data": data},
+            init_globals={"http": http, "ws": ws, "tcp": tcp, "udp": udp, "mqtt": mqtt, "kafka": kafka, "grpc": grpc, "postgres": postgres, "mysql": mysql, "redis": redis, "rabbitmq": rabbitmq, "ftp": ftp, "sftp": sftp, "check": check, "step": step, "group": group, "env": env, "data": data},
             run_name="__vegaload_scenario__",
         )
     except BaseException as e:
@@ -504,13 +585,21 @@ type message struct {
 	// HTTPTimeout, Redirects and Params are the http call's timeout,
 	// redirects and params, as the script gave them; netapi's parsers
 	// check them. They are nil when not given.
-	HTTPTimeout any    `json:"timeout"`
-	Redirects   any    `json:"redirects"`
-	Params      any    `json:"params"`
-	Name        string `json:"name"`
-	Handle      int    `json:"handle"`
-	Data        string `json:"data"`
-	Text        bool   `json:"text"`
+	HTTPTimeout any `json:"timeout"`
+	Redirects   any `json:"redirects"`
+	Params      any `json:"params"`
+	// Name is the step name of a "step" call, the variable of an "env"
+	// call, the file of a "data" call, and the name option of an "http"
+	// call.
+	Name string `json:"name"`
+	// Group is the innermost group an "http" call ran in. URLParts and
+	// URLValues are the template of an http.url, when the call used one.
+	Group     string   `json:"group"`
+	URLParts  []string `json:"url_parts"`
+	URLValues []string `json:"url_values"`
+	Handle    int      `json:"handle"`
+	Data      string   `json:"data"`
+	Text      bool     `json:"text"`
 	// Fn and Args are a "proto" call: the function (such as "tcp.send")
 	// and its keyword arguments.
 	Fn   string         `json:"fn"`
@@ -600,6 +689,13 @@ func WithInputs(in netapi.Inputs) Option { return func(v *VU) { v.inputs = in } 
 // (-no-connection-reuse).
 func WithNoConnectionReuse() Option {
 	return func(v *VU) { v.httpOpts = append(v.httpOpts, netapi.NoConnectionReuse()) }
+}
+
+// WithNoURLGrouping keeps each http call's path as it is in its report row,
+// instead of replacing the parts that look like ids with {id}
+// (-no-url-grouping).
+func WithNoURLGrouping() Option {
+	return func(v *VU) { v.httpOpts = append(v.httpOpts, netapi.NoURLGrouping()) }
 }
 
 // NewVU starts a fresh python3 subprocess for one virtual user and waits
@@ -905,13 +1001,22 @@ func (v *VU) callHTTP(msg message) (interface{}, error) {
 	if msg.Body != "" {
 		body = []byte(msg.Body)
 	}
-	resp, err := v.http.Do(v.ctx, msg.Method, msg.URL, body, netapi.Options{
+	rawURL, urlName := msg.URL, ""
+	if len(msg.URLParts) > 0 {
+		if len(msg.URLValues) != len(msg.URLParts)-1 {
+			return nil, fmt.Errorf("http.url: %d parts and %d values", len(msg.URLParts), len(msg.URLValues))
+		}
+		rawURL, urlName = urlname.Template(msg.URLParts, msg.URLValues)
+	}
+	resp, err := v.http.Do(v.ctx, msg.Method, rawURL, body, netapi.Options{
 		Headers:            msg.Headers,
 		InsecureSkipVerify: msg.Insecure,
 		ExpectedStatuses:   msg.ExpectedStatuses,
 		Timeout:            timeout,
 		Redirects:          redirects,
 		Params:             params,
+		Name:               cmp.Or(msg.Name, urlName),
+		Group:              msg.Group,
 	})
 	if err != nil {
 		return nil, err

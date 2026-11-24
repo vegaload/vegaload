@@ -192,8 +192,14 @@ type ProtocolResult struct {
 }
 
 // OperationResult is one operation inside a protocol, such as ftp roundtrip.
+// An HTTP protocol (see IsHTTP) has one per endpoint, named "METHOD name",
+// such as "GET /users/{id}", with Method and Endpoint set to the two parts.
+// Its calls past MaxEndpoints rows share the row OtherEndpoints, which has
+// neither.
 type OperationResult struct {
 	Name          string  `json:"name"`
+	Method        string  `json:"method,omitempty"`
+	Endpoint      string  `json:"endpoint,omitempty"`
 	Total         int64   `json:"total"`
 	Failed        int64   `json:"failed"`
 	ErrorRate     float64 `json:"error_rate"`
@@ -233,7 +239,7 @@ func (r *Result) Protocol(name string) (ProtocolResult, bool) {
 // ShowProtocols reports whether the text, Markdown, and HTML views should
 // print the protocol breakdown. JSON always keeps the data. A run that
 // only called http, http1, or http2 keeps the layout it had before this
-// breakdown existed.
+// breakdown existed: its rows are the endpoints table (see Endpoints).
 func ShowProtocols(res *Result) bool {
 	if res == nil || len(res.Protocols) == 0 {
 		return false
@@ -247,6 +253,23 @@ func ShowProtocols(res *Result) bool {
 	default:
 		return true
 	}
+}
+
+// Endpoints is the rows of every HTTP protocol the run called, in order:
+// one per "METHOD name", then the Other row if the cap was reached. The
+// text, Markdown and HTML views show them as the endpoints table, and leave
+// them out of the protocol breakdown.
+func Endpoints(res *Result) []OperationResult {
+	if res == nil {
+		return nil
+	}
+	var out []OperationResult
+	for _, p := range res.Protocols {
+		if IsHTTP(p.Name) {
+			out = append(out, p.Operations...)
+		}
+	}
+	return out
 }
 
 // FormatByteCount renders a byte count as B, KiB, MiB, GiB, TiB, or PiB.

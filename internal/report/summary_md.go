@@ -75,10 +75,20 @@ func MarkdownSummary(res *Result) string {
 				st.ErrorRate*100, st.Latency.P50.Round(time.Microsecond), st.Latency.P95.Round(time.Microsecond), st.Latency.Max.Round(time.Microsecond))
 		}
 	}
+	if rows := Endpoints(res); len(rows) > 0 {
+		b.WriteString("\n### Endpoints\n\n| Result | Endpoint | Calls | Failed | Error rate | p50 | p95 | Max |\n|---|---|---:|---:|---:|---:|---:|---:|\n")
+		for _, op := range rows {
+			fmt.Fprintf(&b, "| %s | %s | %d | %d | %.2f%% | %s | %s | %s |\n", passWord(op.Failed == 0), mdCell(op.Name), op.Total, op.Failed,
+				op.ErrorRate*100, op.Latency.P50.Round(time.Microsecond), op.Latency.P95.Round(time.Microsecond), op.Latency.Max.Round(time.Microsecond))
+		}
+	}
 	if ShowProtocols(res) {
 		b.WriteString("\n### Protocols\n\n| Result | Protocol | Calls | Failed | Error rate | p50 | p95 | Max | Sent | Received |\n|---|---|---:|---:|---:|---:|---:|---:|---:|---:|\n")
 		for _, p := range res.Protocols {
 			writeMDCall(&b, p.Name, p.Total, p.Failed, p.ErrorRate, p.Latency, p.BytesSent, p.BytesReceived)
+			if IsHTTP(p.Name) {
+				continue
+			}
 			for _, op := range p.Operations {
 				writeMDCall(&b, "↳ "+op.Name, op.Total, op.Failed, op.ErrorRate, op.Latency, op.BytesSent, op.BytesReceived)
 			}

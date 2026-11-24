@@ -90,6 +90,29 @@ Each failed request has a reason: `timeout`, `status 503` (the status it
 got), `connection refused`, `connection reset`, `dns`, `tls` or `error`. The
 summary prints them as `failures:`, and the JSON has them as `failure_reasons`.
 
+## Groups
+
+A group is a step that also names the HTTP calls inside it. `group(name, fn)` runs `fn` and returns its value:
+
+```js
+const order = group("checkout", () => {
+  http.post(base + "/cart", { body: cart });    // row: POST checkout
+  return http.post(base + "/orders").json();    // row: POST checkout
+});
+```
+
+In Python, `with group("checkout"):` names a block, and `group("checkout", fn)` runs a function and returns its value:
+
+```python
+with group("checkout"):
+    http.post(base + "/cart", body=cart)
+    order = http.post(base + "/orders").json()
+```
+
+Each HTTP call inside is reported as `METHOD checkout`, unless the call has its own `name` or uses `http.url`. When groups nest, the innermost one names the calls. Calls over other protocols keep their own names.
+
+A group is timed like a step: it is in the steps table, and `-threshold 'p95{step="checkout"} < 500ms'` gates it. A group that throws (or raises) fails like a step. See [Endpoint rows](/guides/http#endpoint-rows) and [Steps](/guides/thresholds#steps).
+
 ## Call other protocols from a scenario
 
 The full list, with options and examples, is in [Supported protocols](/guides).

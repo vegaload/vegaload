@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/vegaload/vegaload/internal/secrets"
+	"github.com/vegaload/vegaload/internal/urlname"
 )
 
 // maxCallNames is the cap on protocol names, and on operation and measure
@@ -14,9 +15,39 @@ const maxCallNames = 32
 
 const otherCalls = "(other)"
 
+// MaxEndpoints is the cap on the rows of an HTTP protocol, one per
+// "METHOD name". The rows past it share one row named OtherEndpoints, so
+// the totals stay exact and memory stays bounded however many URLs a
+// script calls. The cap and the name match the Harness k6 stats sidecar.
+const MaxEndpoints = 500
+
+// OtherEndpoints is the row of the HTTP calls past MaxEndpoints.
+const OtherEndpoints = urlname.Other
+
+// IsHTTP reports whether protocol records one row per endpoint: http in a
+// scenario, and http1 or http2 in -protocol mode.
+func IsHTTP(protocol string) bool {
+	switch protocol {
+	case "http", "http1", "http2":
+		return true
+	}
+	return false
+}
+
+// opCap is how many operations protocol keeps, and the name of the row the
+// rest share.
+func opCap(protocol string) (int, string) {
+	if IsHTTP(protocol) {
+		return MaxEndpoints, OtherEndpoints
+	}
+	return maxCallNames, otherCalls
+}
+
 // callProto is one protocol's operations and phase measures.
 type callProto struct {
 	exact        bool
+	maxOps       int
+	otherOp      string
 	ops          map[string]*callOp
 	opOrder      []string
 	measures     map[string]*dist
@@ -109,6 +140,7 @@ func (c *Collector) protoLocked(name string) *callProto {
 	}
 	if !known {
 		p = &callProto{exact: c.exact}
+		p.maxOps, p.otherOp = opCap(name)
 		c.calls[name] = p
 		c.callOrder = append(c.callOrder, name)
 	}
@@ -125,8 +157,8 @@ func (p *callProto) opLocked(name string) *callOp {
 		p.ops = map[string]*callOp{}
 	}
 	o, known := p.ops[name]
-	if !known && len(p.ops) >= maxCallNames {
-		name = otherCalls
+	if !known && len(p.ops) >= p.maxOps {
+		name = p.otherOp
 		o, known = p.ops[name]
 	}
 	if !known {
@@ -185,7 +217,7 @@ func (c *Collector) snapshotProtocols(elapsed time.Duration) []ProtocolResult {
 			sent += o.sent
 			received += o.received
 			total := o.d.h.Count()
-			ops = append(ops, OperationResult{
+			ops = append(ops, withEndpoint(ps.name, OperationResult{
 				Name:          o.name,
 				Total:         total,
 				Failed:        o.failed,
@@ -193,7 +225,7 @@ func (c *Collector) snapshotProtocols(elapsed time.Duration) []ProtocolResult {
 				Latency:       o.d.latency(),
 				BytesSent:     o.sent,
 				BytesReceived: o.received,
-			})
+			}))
 		}
 		var measures []MeasureResult
 		for _, m := range ps.measures {
@@ -218,6 +250,17 @@ func (c *Collector) snapshotProtocols(elapsed time.Duration) []ProtocolResult {
 		})
 	}
 	return out
+}
+
+// withEndpoint sets the Method and Endpoint of an HTTP protocol's row from
+// its name. Other rows, and the Other row, keep them empty.
+func withEndpoint(protocol string, o OperationResult) OperationResult {
+	if IsHTTP(protocol) {
+		if m, n, ok := urlname.Split(o.Name); ok {
+			o.Method, o.Endpoint = m, n
+		}
+	}
+	return o
 }
 
 func bytesPerSec(bytes int64, secs float64) float64 {

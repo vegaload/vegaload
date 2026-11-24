@@ -65,6 +65,7 @@ Give a scenario file, or give `-target` and `-protocol` for a protocol-direct ru
 | `-insecure` | Skip TLS certificate checks. |
 | `-timeout` | Time limit for each request: each `-protocol` call, or each call a scenario makes. A request that runs out of time fails with the reason `timeout`. Default `30s`. |
 | `-no-connection-reuse` | Open a new connection for every HTTP request, in a scenario and in `-protocol http1` or `http2`, instead of keeping connections open between requests. Use it to measure connection setup on purpose. |
+| `-no-url-grouping` | Keep each HTTP call's URL path as written in its endpoint row. By default a path part that is all digits, a UUID or 16 or more hex digits becomes `{id}`, so `/users/1` and `/users/2` share the row `GET /users/{id}`. For a scenario's HTTP calls and `-protocol http1` or `http2`. See [Endpoint rows](../guides/http.md#endpoint-rows). |
 
 ### Load shape
 
@@ -88,7 +89,7 @@ Give a scenario file, or give `-target` and `-protocol` for a protocol-direct ru
 | `-baseline` | A JSON report of an earlier run. If p95 or the error rate is worse, the run exits 3. |
 | `-max-regression` | With `-baseline`: how many percent worse is allowed. Default `0`. |
 
-Threshold metrics are `p50`, `p90`, `p95`, `p99`, `mean`, `min`, `max`, `error_rate`, `rps`, `failed`, `total` and `check_rate`. A threshold can be limited to a step or a protocol, as in `p95{step="login"} < 300ms` and `p95{protocol="ftp"} < 500ms`. See [Gate a run on thresholds](../guides/thresholds.md).
+Threshold metrics are `p50`, `p90`, `p95`, `p99`, `mean`, `min`, `max`, `error_rate`, `rps`, `failed`, `total` and `check_rate`. A threshold can be limited to a step or a protocol, as in `p95{step="login"} < 300ms` and `p95{protocol="ftp"} < 500ms`, and to one operation, such as the HTTP endpoint row in `p95{protocol="http",op="GET /users/{id}"} < 300ms`. See [Gate a run on thresholds](../guides/thresholds.md).
 
 ### Data and environment
 

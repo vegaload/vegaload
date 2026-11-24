@@ -103,7 +103,9 @@ each is counted on its own. Gate on one step with a selector:
 `-threshold 'p95{step="login"} < 300ms'`. A step that never ran fails its
 threshold. Step names with a quote mark in them cannot be targeted. A run
 keeps at most 100 distinct step names; any more are counted together as
-`(other steps)`. See `examples/scenarios/crud-flow.vl.js`.
+`(other steps)`. See `examples/scenarios/crud-flow.vl.js`. A `group(name, fn)`
+is a step that also names the HTTP calls inside it (see
+[Groups](/guides/scenarios#groups)).
 
 ## Per-protocol results
 
@@ -123,13 +125,16 @@ Under ftp, the operations are `roundtrip`, `upload`, and so on.
 The JSON report includes `protocols` when at least one call was recorded. The
 text summary, the HTML report and the GitHub step summary show the table when
 the run used more than one protocol, or one protocol that is not `http`,
-`http1` or `http2`. A plain HTTP run looks as it did before.
+`http1` or `http2`. The operations of `http`, `http1` and `http2` are not in
+that table. They are the `endpoints` table, shown for every run that made
+HTTP calls.
 
 The names are the protocol and the operation. A script's HTTP calls are
-`http`, and the operation is the method (`GET`, `POST`, and so on; any other
-verb is `OTHER`). A `-protocol` run uses the driver's name, such as `http1`,
-`http2`, `grpc` or `websocket`. The operation is the mode, such as
-`roundtrip`. More measures will come later.
+`http`, and the operation is the endpoint row, such as `GET /users/{id}` (see
+[Endpoint rows](/guides/http#endpoint-rows)). A `-protocol` run uses the
+driver's name, such as `http1`, `http2`, `grpc` or `websocket`. For `http1`
+and `http2` the operation is the endpoint row of `-target`. For the others it
+is the mode, such as `roundtrip`. More measures will come later.
 
 FTP and SFTP also record phase times: `connect_time`, `login_time`,
 `upload_time`, `download_time` and `delete_time`. A connect or login under
@@ -151,6 +156,13 @@ or operation that recorded no calls fails its threshold.
 vegaload run -threshold 'p95{protocol="ftp"} < 500ms' \
   -threshold 'error_rate{protocol="ftp",op="roundtrip"} < 1%' \
   -target ftp://127.0.0.1:2121/ -protocol ftp -opt mode=roundtrip ...
+```
+
+Put an operation in quotes. It may hold spaces, slashes and braces, so one
+HTTP endpoint is a selector too:
+
+```
+vegaload run -threshold 'p95{protocol="http",op="GET /users/{id}"} < 300ms' scenario.vl.js
 ```
 
 A thresholds file names them next to `step`:

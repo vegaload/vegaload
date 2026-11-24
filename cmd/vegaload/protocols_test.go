@@ -48,7 +48,7 @@ func TestDrivers_EveryEntryBuilds(t *testing.T) {
 		}
 		seen[d.name] = true
 
-		iter, closeFn, err := protocolIteration(d.name, wireTestTarget(d.name), 0, nil, nil)
+		iter, closeFn, err := protocolIteration(d.name, wireTestTarget(d.name), 0, nil, nil, false)
 		if err != nil {
 			t.Errorf("protocol %q does not build: %v", d.name, err)
 			continue
@@ -67,7 +67,7 @@ func TestDrivers_EveryEntryBuilds(t *testing.T) {
 }
 
 func TestProtocolIteration_UnknownProtocol(t *testing.T) {
-	_, _, err := protocolIteration("nope", protocol.Target{URL: "x"}, 0, nil, nil)
+	_, _, err := protocolIteration("nope", protocol.Target{URL: "x"}, 0, nil, nil, false)
 	if err == nil || !strings.Contains(err.Error(), "unknown -protocol") || !strings.Contains(err.Error(), "http1") {
 		t.Fatalf("err = %v, want it to name the choices", err)
 	}
@@ -79,7 +79,7 @@ func TestProtocolIteration_UnknownOptionIsRefused(t *testing.T) {
 	for _, d := range drivers {
 		tg := wireTestTarget(d.name)
 		tg.Options = map[string]string{"definitely-not-a-key": "1"}
-		_, _, err := protocolIteration(d.name, tg, 0, nil, nil)
+		_, _, err := protocolIteration(d.name, tg, 0, nil, nil, false)
 		if err == nil || !strings.Contains(err.Error(), "unknown option definitely-not-a-key") {
 			t.Errorf("protocol %q: err = %v, want an unknown option error", d.name, err)
 		}
@@ -89,7 +89,7 @@ func TestProtocolIteration_UnknownOptionIsRefused(t *testing.T) {
 func TestProtocolIteration_DriverWithoutOptionsSaysSo(t *testing.T) {
 	tg := wireTestTarget("http1")
 	tg.Options = map[string]string{"read": "64"}
-	_, _, err := protocolIteration("http1", tg, 0, nil, nil)
+	_, _, err := protocolIteration("http1", tg, 0, nil, nil, false)
 	if err == nil || !strings.Contains(err.Error(), "unknown option read") {
 		t.Fatalf("err = %v, want an unknown option error", err)
 	}
@@ -157,7 +157,7 @@ func wireTestTarget(name string) protocol.Target {
 func TestProtocolIteration_KnownOptionIsAccepted(t *testing.T) {
 	tg := wireTestTarget("tcp")
 	tg.Options = map[string]string{"read": "4", "expect": "ok"}
-	if _, closeFn, err := protocolIteration("tcp", tg, 0, nil, nil); err != nil {
+	if _, closeFn, err := protocolIteration("tcp", tg, 0, nil, nil, false); err != nil {
 		t.Fatalf("known tcp options refused: %v", err)
 	} else {
 		_ = closeFn()
@@ -165,7 +165,7 @@ func TestProtocolIteration_KnownOptionIsAccepted(t *testing.T) {
 
 	tg = wireTestTarget("udp")
 	tg.Options = map[string]string{"read": "4"}
-	if _, _, err := protocolIteration("udp", tg, 0, nil, nil); err == nil {
+	if _, _, err := protocolIteration("udp", tg, 0, nil, nil, false); err == nil {
 		t.Error("read is a tcp option and must be refused for udp")
 	}
 }

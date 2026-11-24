@@ -63,8 +63,8 @@ func TestHTTPGlobal_StatusFailsTheCallNotTheIteration(t *testing.T) {
 	if !ok || p.Total != 6 || p.Failed != 3 {
 		t.Fatalf("http = %+v, want 6 calls with 3 failed (500, 404, and 200 when 201 was expected)", p)
 	}
-	get, _ := p.Operation("GET")
-	post, _ := p.Operation("POST")
+	get, _ := p.Operation("GET /status/{id}")
+	post, _ := p.Operation("POST /status/{id}")
 	if get.Failed != 2 || post.Failed != 1 {
 		t.Errorf("GET failed %d, POST failed %d, want 2 and 1", get.Failed, post.Failed)
 	}

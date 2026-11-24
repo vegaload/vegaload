@@ -578,7 +578,7 @@ func openDataIter(t *testing.T, calls netapi.CallRecorder, args ...string) (func
 	if err != nil {
 		t.Fatal(err)
 	}
-	iter, closeFn, err := protocolIteration(cfg.Protocol, cfg.Target, cfg.Timeout, calls, cfg.DataPlan)
+	iter, closeFn, err := protocolIteration(cfg.Protocol, cfg.Target, cfg.Timeout, calls, cfg.DataPlan, false)
 	if err != nil {
 		t.Fatal(err)
 	}
