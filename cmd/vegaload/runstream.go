@@ -209,7 +209,7 @@ func (s *runStream) setup(noOpen bool) (*streaming, error) {
 	if len(where) > 0 {
 		fmt.Fprintf(os.Stderr, "streaming run %s: %s\n", runID, strings.Join(where, ", "))
 	}
-	if lv != nil {
+	if lv != nil && lv.page != "" {
 		fmt.Fprintf(os.Stderr, "live view: %s   (not wanted? -no-live, or VEGALOAD_LIVE=off)\n", lv.page)
 		if live.OpenEnabled(noOpen) {
 			if err := live.Opener(lv.page); err != nil {
@@ -241,18 +241,14 @@ type liveView struct {
 // never fails the run: a machine with no service, or one that cannot keep its
 // identity file, just runs without the view.
 func (s *runStream) resolveLive() *liveView {
-	id, err := live.Load()
+	base, err := live.Destination(s.liveURL)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "live view: off (%v)\n", err)
 		return nil
 	}
-	base, err := id.BaseURL(s.liveURL)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "live view: off (%v)\n", err)
-		return nil
-	}
-	push, err := stream.ValidatePushURL(id.PushURL(base), false)
-	if err != nil {
+	// The rules for the address first, so that nothing is asked of a service
+	// that a push to it would be refused for (a remote http:// address).
+	if _, err := stream.ValidatePushURL(base.String()+"/v1/projects/p/ingest", false); err != nil {
 		fmt.Fprintf(os.Stderr, "live view: off (%v)\n", err)
 		return nil
 	}
@@ -260,12 +256,34 @@ func (s *runStream) resolveLive() *liveView {
 		fmt.Fprintf(os.Stderr, "live view: off, %s://%s %v. The run goes on without it (-no-live to stop this message)\n", base.Scheme, base.Host, err)
 		return nil
 	}
-	if id.Created {
+	r, err := live.Resolve(context.Background(), base)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "live view: off, %v. The run goes on without it\n", err)
+		return nil
+	}
+	push, err := stream.ValidatePushURL(r.PushURL(base), false)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "live view: off (%v)\n", err)
+		return nil
+	}
+	if r.Hosted && r.ViewKey == "" {
+		// The environment gave a project and a token but no view key, so
+		// there is no page address to show. The events are still sent.
+		fmt.Fprintf(os.Stderr, "live view: sending to %s://%s; set VEGALOAD_LIVE_VIEW_KEY to be shown the page address\n", base.Scheme, base.Host)
+		return &liveView{push: push, token: r.PushToken}
+	}
+	switch {
+	case r.Made:
+		fmt.Fprintf(os.Stderr, "live view: made a project on %s://%s for this machine, kept in %s\n", base.Scheme, base.Host, r.Identity.Path)
+		if n := r.Notice(); n != "" {
+			fmt.Fprintln(os.Stderr, "live view:", n)
+		}
+	case r.Identity != nil && r.Identity.Created && !r.Hosted:
 		// The project id is the secret that protects the page, so it is not
 		// repeated here; the URL printed next is the one place it appears.
-		fmt.Fprintf(os.Stderr, "live view: made a project for this machine, kept in %s\n", id.Path)
+		fmt.Fprintf(os.Stderr, "live view: made a project for this machine, kept in %s\n", r.Identity.Path)
 	}
-	return &liveView{push: push, token: id.PushToken, page: id.PageURL(base)}
+	return &liveView{push: push, token: r.PushToken, page: r.PageURL(base)}
 }
 
 // attach is called by the runner once the run's clock has started.

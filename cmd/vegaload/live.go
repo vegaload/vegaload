@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -35,32 +36,40 @@ func cmdLive(args []string) int {
 		return 2
 	}
 
-	var id *live.Identity
-	var err error
-	if reset {
-		id, err = live.Reset()
-	} else {
-		id, err = live.Load()
-	}
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "vegaload live:", err)
-		return 1
-	}
-	base, err := id.BaseURL(*url)
+	base, err := live.Destination(*url)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "vegaload live:", err)
 		return 2
 	}
-	switch {
-	case reset:
+	if reset {
+		if _, err := live.Reset(); err != nil {
+			fmt.Fprintln(os.Stderr, "vegaload live:", err)
+			return 1
+		}
 		fmt.Fprintln(os.Stderr, "vegaload live: made a new project; runs of the old one stay under its old address")
-	case id.Created:
+	}
+	r, err := live.Resolve(context.Background(), base)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "vegaload live: %v\n", err)
+		return 1
+	}
+	if r.Hosted && r.ViewKey == "" {
+		fmt.Fprintln(os.Stderr, "vegaload live: set VEGALOAD_LIVE_VIEW_KEY to be shown the page address of the project in the environment")
+		return 1
+	}
+	if r.Identity != nil && r.Identity.Created && !reset && !r.Hosted {
 		fmt.Fprintln(os.Stderr, "vegaload live: made a project for this machine")
 	}
-	fmt.Println(id.PageURL(base))
-	fmt.Fprintf(os.Stderr, "identity kept in %s (mode 0600). The push token in it is never shown, and is sent only to %s://%s.\n", id.Path, base.Scheme, base.Host)
+	page := r.PageURL(base)
+	fmt.Println(page)
+	if n := r.Notice(); n != "" {
+		fmt.Fprintln(os.Stderr, "vegaload live:", n)
+	}
+	if r.Identity != nil {
+		fmt.Fprintf(os.Stderr, "identity kept in %s (mode 0600). The push token in it is never shown, and is sent only to %s://%s.\n", r.Identity.Path, base.Scheme, base.Host)
+	}
 	if *open {
-		if err := live.Opener(id.PageURL(base)); err != nil {
+		if err := live.Opener(page); err != nil {
 			fmt.Fprintf(os.Stderr, "vegaload live: could not open the browser (%v)\n", err)
 			return 1
 		}
