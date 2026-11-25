@@ -41,6 +41,9 @@ type Identity struct {
 	PushToken string    `json:"pushToken"`
 	Base      string    `json:"base,omitempty"` // overrides DefaultBase
 	CreatedAt time.Time `json:"createdAt"`
+	// Issued holds the projects a hosted service made for this machine, by the
+	// address of the service (issue.go).
+	Issued map[string]*Issued `json:"issued,omitempty"`
 
 	Created bool   `json:"-"` // made by this call
 	Path    string `json:"-"` // where it is kept
@@ -149,6 +152,34 @@ func (id *Identity) BaseURL(flag string) (*url.URL, error) {
 	if raw == "" {
 		raw = DefaultBase
 	}
+	return parseBase(raw)
+}
+
+// Destination is BaseURL for a caller that has not loaded the identity, and
+// must not make its file: a CI job that names its project in the environment
+// needs no file. It reads the kept address if there is a file.
+func Destination(flag string) (*url.URL, error) {
+	raw := flag
+	if raw == "" {
+		raw = os.Getenv("VEGALOAD_LIVE_URL")
+	}
+	if raw == "" {
+		if dir, err := Dir(); err == nil {
+			if b, err := os.ReadFile(filepath.Join(dir, "live.json")); err == nil {
+				var id Identity
+				if json.Unmarshal(b, &id) == nil {
+					raw = id.Base
+				}
+			}
+		}
+	}
+	if raw == "" {
+		raw = DefaultBase
+	}
+	return parseBase(raw)
+}
+
+func parseBase(raw string) (*url.URL, error) {
 	u, err := url.Parse(strings.TrimRight(raw, "/"))
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return nil, fmt.Errorf("live view URL %q: want http:// or https:// with a host", strings.SplitN(raw, "?", 2)[0])
@@ -159,15 +190,11 @@ func (id *Identity) BaseURL(flag string) (*url.URL, error) {
 	return u, nil
 }
 
-// PushURL is where the events of this machine's project are sent.
-func (id *Identity) PushURL(base *url.URL) string {
-	return base.String() + "/v1/projects/" + id.ProjectID + "/ingest?source=vegaload"
-}
+// PushURL is where the events of this machine's project at base are sent.
+func (id *Identity) PushURL(base *url.URL) string { return id.Binding(base).PushURL(base) }
 
-// PageURL is the page that shows the latest run of this machine's project.
-func (id *Identity) PageURL(base *url.URL) string {
-	return base.String() + "/p/" + id.ProjectID
-}
+// PageURL is the page that shows the latest run of this machine's project at base.
+func (id *Identity) PageURL(base *url.URL) string { return id.Binding(base).PageURL(base) }
 
 // Enabled reports whether `run` should use the live view by default.
 //
