@@ -97,8 +97,9 @@ func TestConvert_NoSecretReachesTheFile(t *testing.T) {
 	}
 	for _, line := range []string{
 		`"Authorization": "Bearer " + c2_token`,
-		`const c2_token = r2.json().token`,
-		`const c2_userId = r2.json().userId`,
+		`let c2_userId, c2_token;`,
+		`    c2_token = r2.json().token`,
+		`    c2_userId = r2.json().userId`,
 		`encodeURIComponent(c2_userId)`,
 		`"Cookie": env.VL_COOKIE`,
 		`"password": env.VL_PASSWORD`,
@@ -127,15 +128,15 @@ func TestConvert_DropsHeadersTheClientSetsItself(t *testing.T) {
 func TestConvert_JSONBodyKeepsOrderAndTypes(t *testing.T) {
 	res := convertShop(t, "shop.example.com", Options{})
 	want := "body: JSON.stringify({\n" +
-		"      \"email\": \"a@example.com\",\n" +
-		"      \"password\": env.VL_PASSWORD,\n" +
-		"      \"remember\": true,\n" +
-		"      \"plan\": null,\n" +
-		"      \"tags\": [\n" +
-		"        \"a\",\n" +
-		"        \"b\",\n" +
-		"      ],\n" +
-		"    }),"
+		"        \"email\": \"a@example.com\",\n" +
+		"        \"password\": env.VL_PASSWORD,\n" +
+		"        \"remember\": true,\n" +
+		"        \"plan\": null,\n" +
+		"        \"tags\": [\n" +
+		"          \"a\",\n" +
+		"          \"b\",\n" +
+		"        ],\n" +
+		"      }),"
 	if !strings.Contains(res.Script, want) {
 		t.Errorf("JSON body not as expected in\n%s", res.Script)
 	}
@@ -186,8 +187,8 @@ func TestConvert_RecordedErrorStatusIsExpected(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"const r2 = http.get(\"https://app.example.com/api/items/9\", {\n    expectedStatuses: [404],\n  });",
-		"const r3 = http.get(\"https://app.example.com/api/flaky\", {\n    expectedStatuses: [503],\n  });",
+		"const r2 = http.get(\"https://app.example.com/api/items/9\", {\n    expectedStatuses: [404],\n    name: \"/api/items/{id}\",\n  });",
+		"const r3 = http.get(\"https://app.example.com/api/flaky\", {\n    expectedStatuses: [503],\n    name: \"/api/flaky\",\n  });",
 	} {
 		if !strings.Contains(res.Script, want) {
 			t.Errorf("missing %q in:\n%s", want, res.Script)
@@ -198,17 +199,17 @@ func TestConvert_RecordedErrorStatusIsExpected(t *testing.T) {
 	}
 }
 
-func TestConvert_MultipartBodyIsLeftOutWithANote(t *testing.T) {
+func TestConvert_UnreadableMultipartBodyIsLeftOutWithANote(t *testing.T) {
 	res := convertShop(t, "shop.example.com", Options{})
 	if !strings.Contains(res.Script, "multipart form") || strings.Contains(res.Script, "--x") {
-		t.Errorf("the multipart body should be left out with a note:\n%s", res.Script)
+		t.Errorf("a multipart body with no part headers should be left out with a note:\n%s", res.Script)
 	}
 }
 
-func TestConvert_PageTitleIsAComment(t *testing.T) {
+func TestConvert_ThePageIsAGroup(t *testing.T) {
 	res := convertShop(t, "shop.example.com", Options{})
-	if !strings.Contains(res.Script, "// ---- page: Shop home") {
-		t.Error("the page title should appear once as a comment")
+	if strings.Count(res.Script, `group("Shop home", () => {`) != 1 || !strings.HasSuffix(res.Script, "  });\n}\n") {
+		t.Errorf("the page should be one group:\n%s", res.Script)
 	}
 }
 

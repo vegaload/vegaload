@@ -133,6 +133,15 @@ func NewCollectorWith(o Options) *Collector {
 // (and in a live point) counts from it.
 func (c *Collector) Start() time.Time { return c.start }
 
+// StartNow starts the run's clock again, now. Call it before anything is
+// recorded, when work before the load (a scenario's setup) must not count
+// in the run's time.
+func (c *Collector) StartNow() {
+	c.mu.Lock()
+	c.start = time.Now()
+	c.mu.Unlock()
+}
+
 // RequestsFromCalls makes each protocol call one request, instead of each
 // iteration: the latency, counts, error rate, failure reasons and time
 // series are then the calls', and the iterations are counted on their own

@@ -34,11 +34,11 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -53,9 +53,7 @@ import (
 	"github.com/vegaload/vegaload/internal/protocol/xfercommon"
 	"github.com/vegaload/vegaload/internal/report"
 	"github.com/vegaload/vegaload/internal/safety"
-	"github.com/vegaload/vegaload/internal/scripting/js"
 	"github.com/vegaload/vegaload/internal/scripting/netapi"
-	"github.com/vegaload/vegaload/internal/scripting/python"
 	"github.com/vegaload/vegaload/internal/secrets"
 	"github.com/vegaload/vegaload/internal/threshold"
 	"github.com/vegaload/vegaload/internal/urlname"
@@ -140,6 +138,8 @@ type runConfig struct {
 	// row, instead of replacing the parts that look like ids with {id}
 	// (-no-url-grouping).
 	NoURLGrouping bool
+	// NoCookies turns off each scenario VU's cookie jar (-no-cookies).
+	NoCookies bool
 
 	OutPath string
 
@@ -206,7 +206,14 @@ type runConfig struct {
 	// nil when the run is not streamed, and then nothing streams.
 	Stream runStream
 	stream *streaming
+
+	// runCtx ends when the run is stopped by Ctrl-C or SIGTERM. It is nil
+	// when nothing can stop it, such as in a test.
+	runCtx context.Context //nolint:containedctx // set by cmdRun for the one run this config describes
 }
+
+// errInterrupted is a run stopped by Ctrl-C or SIGTERM.
+var errInterrupted = errors.New("interrupted")
 
 // parseRunArgs parses run's flags into a runConfig. It returns a usage
 // error (rather than exiting the process) so it can be exercised by
@@ -238,6 +245,7 @@ func parseRunArgs(args []string) (*runConfig, error) {
 	fs.BoolVar(&insecure, "insecure", false, "skip TLS certificate verification")
 	fs.DurationVar(&cfg.Timeout, "timeout", 30*time.Second, "time limit for each request: each -protocol call, or each call a scenario makes. A request that runs out of time fails with the reason \"timeout\"")
 	fs.BoolVar(&cfg.NoConnectionReuse, "no-connection-reuse", false, "open a new connection for every HTTP request, in a scenario and in -protocol http1 or http2, instead of keeping connections open between requests. Use it to measure connection setup on purpose")
+	fs.BoolVar(&cfg.NoCookies, "no-cookies", false, "turn off each scenario VU's cookie jar. By default a cookie a server sets is sent back on that VU's later calls, and the jar is emptied at the start of each iteration")
 	fs.BoolVar(&cfg.NoURLGrouping, "no-url-grouping", false, "keep each HTTP call's URL path as it is in its endpoint row. By default, path parts that are numbers, UUIDs or long hex strings become {id}, so /users/1 and /users/2 share the row GET /users/{id}")
 	fs.StringVar(&cfg.OutPath, "out", "", "also write a JSON summary to this path")
 	fs.BoolVar(&cfg.ExactPercentiles, "exact-percentiles", false, "keep every sample to compute exact percentiles, instead of estimating them within 2.5% from histograms. Memory grows with the number of requests: use it for small local runs")
@@ -334,9 +342,6 @@ func parseRunArgs(args []string) (*runConfig, error) {
 		cfg.Thresholds = append(cfg.Thresholds, ts...)
 	}
 
-	if cfg.AbortOnBreach && len(cfg.Thresholds) == 0 {
-		return nil, fmt.Errorf("-abort-on-breach needs at least one -threshold or -thresholds")
-	}
 	if cfg.AbortGrace < 0 {
 		return nil, fmt.Errorf("-abort-grace %s: want zero or more", cfg.AbortGrace)
 	}
@@ -388,6 +393,19 @@ func parseRunArgs(args []string) (*runConfig, error) {
 	}
 	if cfg.ScenarioPath != "" && len(cfg.Target.Options) > 0 {
 		return nil, fmt.Errorf("-opt sets options for a protocol driver, so it needs -target and -protocol, not a scenario file")
+	}
+	if cfg.ScenarioPath != "" {
+		given := map[string]bool{}
+		fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
+		if err := applyScenarioOptions(cfg, given); err != nil {
+			return nil, err
+		}
+	}
+	if cfg.AbortOnBreach && len(cfg.Thresholds) == 0 {
+		return nil, fmt.Errorf("-abort-on-breach needs at least one -threshold or -thresholds")
+	}
+	if cfg.NoCookies && cfg.Protocol != "" {
+		return nil, fmt.Errorf("-no-cookies is for a scenario's http calls, not -protocol %s", cfg.Protocol)
 	}
 	if cfg.Protocol != "" {
 		if _, ok := findDriver(cfg.Protocol); !ok {
@@ -528,17 +546,28 @@ func concurrencyHint(cfg *runConfig) int {
 
 // buildIteration returns the engine.IterationFunc for cfg (either
 // protocol-direct or scripted) and a cleanup function the caller must
-// run once the executor has finished.
-func buildIteration(cfg *runConfig) (engine.IterationFunc, func() error, error) {
+// run once the executor has finished. For a scenario it also returns the
+// loaded scenario, for its setup and teardown; it is nil otherwise.
+//
+// A scenario's VUs come from a pool (see vupool.go) and every one gets the
+// same netapi.SafetyCheck and cfg.Timeout, so FR-CLI-08's http/ws globals
+// enforce FR-CLI-06's allowlist and respect the run's per-request timeout
+// exactly as -target/-protocol mode's own driver does.
+func buildIteration(cfg *runConfig) (engine.IterationFunc, func() error, *scenario, error) {
 	if cfg.ScenarioPath != "" {
-		return scriptedIteration(cfg, concurrencyHint(cfg))
+		sc, err := loadScenario(cfg, concurrencyHint(cfg))
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		return sc.pool.iteration, sc.Close, sc, nil
 	}
 	// One driver serves every VU, so its connection pool is sized from
 	// the most VUs that can be in flight at once.
 	target := cfg.Target
 	target.MaxConns = concurrencyHint(cfg)
 	target.NoConnectionReuse = cfg.NoConnectionReuse
-	return protocolIteration(cfg.Protocol, target, cfg.Timeout, cfg.callRecorder, cfg.DataPlan, cfg.NoURLGrouping)
+	iter, closeFn, err := protocolIteration(cfg.Protocol, target, cfg.Timeout, cfg.callRecorder, cfg.DataPlan, cfg.NoURLGrouping)
+	return iter, closeFn, nil, err
 }
 
 // buildSafetyCheck returns the netapi.SafetyCheck every scripted VU's
@@ -718,78 +747,6 @@ func driverRefused(res protocol.Result) bool {
 	return res.Refused
 }
 
-// scriptedIteration loads cfg.ScenarioPath (as JavaScript/TypeScript or
-// Python, decided by extension) and returns an engine.IterationFunc
-// backed by a vuPool sized by concurrency — see vupool.go for why a
-// pool, rather than one shared runtime, is needed here.
-//
-// Every VU it creates gets the same netapi.SafetyCheck (built once, via
-// buildSafetyCheck) and cfg.Timeout, so FR-CLI-08's http/ws globals
-// enforce FR-CLI-06's allowlist and respect the run's per-request
-// timeout exactly as -target/-protocol mode's own driver does.
-func scriptedIteration(cfg *runConfig, concurrency int) (engine.IterationFunc, func() error, error) {
-	path := cfg.ScenarioPath
-	check := buildSafetyCheck(cfg)
-
-	if strings.ToLower(filepath.Ext(path)) == ".py" {
-		script, err := python.Load(path)
-		if err != nil {
-			return nil, nil, err
-		}
-		opts := []python.Option{python.WithInputs(cfg.Inputs)}
-		if cfg.NoConnectionReuse {
-			opts = append(opts, python.WithNoConnectionReuse())
-		}
-		if cfg.NoURLGrouping {
-			opts = append(opts, python.WithNoURLGrouping())
-		}
-		pool := newVUPool(concurrency, func() (iterCloser, error) {
-			vu, err := script.NewVU(check, cfg.Timeout, opts...)
-			if err != nil {
-				return nil, err
-			}
-			vu.SetCheckRecorder(cfg.checkRecorder)
-			vu.SetStepRecorder(cfg.stepRecorder)
-			vu.SetCallRecorder(cfg.callRecorder)
-			return vu, nil
-		})
-		// Validate the script once, up front, the same way
-		// protocol-direct mode's New() fails fast on a bad target,
-		// instead of only discovering a broken script on the first
-		// iteration deep inside the executor.
-		if _, err := pool.borrowAndRelease(); err != nil {
-			return nil, nil, err
-		}
-		return pool.iteration, pool.Close, nil
-	}
-
-	script, err := js.Load(path)
-	if err != nil {
-		return nil, nil, err
-	}
-	opts := []js.Option{js.WithInputs(cfg.Inputs)}
-	if cfg.NoConnectionReuse {
-		opts = append(opts, js.WithNoConnectionReuse())
-	}
-	if cfg.NoURLGrouping {
-		opts = append(opts, js.WithNoURLGrouping())
-	}
-	pool := newVUPool(concurrency, func() (iterCloser, error) {
-		vu, err := script.NewVU(check, cfg.Timeout, opts...)
-		if err != nil {
-			return nil, err
-		}
-		vu.SetCheckRecorder(cfg.checkRecorder)
-		vu.SetStepRecorder(cfg.stepRecorder)
-		vu.SetCallRecorder(cfg.callRecorder)
-		return vu, nil
-	})
-	if _, err := pool.borrowAndRelease(); err != nil {
-		return nil, nil, err
-	}
-	return pool.iteration, pool.Close, nil
-}
-
 // runScenario runs cfg end to end: builds the executor and iteration
 // function, runs them, and returns the result. It has no dependency on
 // flag or os, so a test can call it directly. It records into a fresh
@@ -822,8 +779,32 @@ func runScenarioWithCollector(cfg *runConfig, collector *report.Collector) (*rep
 		collector.RequestsFromCalls()
 	}
 
-	// A streamed run says it has started before the scenario is loaded, so a
-	// scenario that cannot be loaded is a run.failed after a run.started.
+	iter, closeFn, sc, err := buildIteration(cfg)
+	if err != nil {
+		return nil, err
+	}
+	defer closeFn() //nolint:errcheck // best-effort cleanup; a close failure shouldn't mask the run's own result
+
+	// runCtx ends on Ctrl-C or SIGTERM (see runSignals). The load stops,
+	// and teardown still runs.
+	runCtx := cfg.runCtx
+	if runCtx == nil {
+		runCtx = context.Background()
+	}
+	if sc != nil {
+		if err := sc.setup(runCtx, lifecycleTimeout(cfg)); err != nil {
+			if runCtx.Err() != nil {
+				return nil, errInterrupted
+			}
+			return nil, err
+		}
+		// A slow setup is not part of the run's time.
+		collector.StartNow()
+	}
+
+	// A streamed run says it has started once it is ready to send load. A
+	// scenario that cannot be loaded, or whose setup fails, still ends with
+	// a run.failed after a run.started (see streaming.end).
 	var feed *pointFeed
 	if cfg.stream != nil {
 		feed = cfg.stream.begin(cfg, ex, collector)
@@ -831,13 +812,7 @@ func runScenarioWithCollector(cfg *runConfig, collector *report.Collector) (*rep
 		defer feed.finish()
 	}
 
-	iter, closeFn, err := buildIteration(cfg)
-	if err != nil {
-		return nil, err
-	}
-	defer closeFn() //nolint:errcheck // best-effort cleanup; a close failure shouldn't mask the run's own result
-
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(runCtx)
 	defer cancel()
 
 	start := time.Now()
@@ -864,13 +839,28 @@ func runScenarioWithCollector(cfg *runConfig, collector *report.Collector) (*rep
 	runErr := ex.Run(ctx, iter, collector)
 	genStats := gen.Stop()
 	stopWatcher()
+	elapsed := time.Since(start)
+	// teardown runs however the load ended: at its planned end, stopped by
+	// -abort-on-breach, by Ctrl-C, or with an error.
+	var teardownErr error
+	if sc != nil {
+		teardownErr = sc.teardown(lifecycleTimeout(cfg))
+	}
 	if runErr != nil {
 		return nil, runErr
 	}
-	elapsed := time.Since(start)
+	if runCtx.Err() != nil {
+		if teardownErr != nil {
+			fmt.Fprintf(os.Stderr, "vegaload run: warning: %s\n", secrets.Redact(teardownErr.Error()))
+		}
+		return nil, errInterrupted
+	}
 
 	result := collector.Finish(ex.Name(), elapsed)
 	applyGenerator(result, genStats, collector.DroppedPercent())
+	if teardownErr != nil {
+		result.Warnings = append(result.Warnings, secrets.Redact(teardownErr.Error()))
+	}
 	if feed != nil {
 		feed.finishWith(result.Warnings)
 	}
@@ -1012,9 +1002,14 @@ func cmdRun(args []string) int {
 		for _, w := range st.warnings {
 			fmt.Fprintln(os.Stderr, w)
 		}
-		st.watchSignals()
 	}
+	sigs := watchRunSignals(st)
+	cfg.runCtx = sigs.ctx
 	code := executeRun(cfg, &out)
+	sigs.stop()
+	if sig := sigs.received(); sig != nil {
+		code = signalExitCode(sig)
+	}
 	st.end(cfg, &out, code)
 	return code
 }

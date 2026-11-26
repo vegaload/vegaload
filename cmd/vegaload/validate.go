@@ -31,8 +31,9 @@ type validateResult struct {
 	// invalid: the checks are listed so the author can see them.
 	Valid bool `json:"valid"`
 	// Stage says where an invalid scenario stopped: "load" (the script
-	// could not be read, parsed or started) or "iteration" (it started,
-	// but the iteration returned an error).
+	// could not be read, parsed or started, or its options are wrong),
+	// "setup", "iteration" (it started, but the iteration returned an
+	// error) or "teardown".
 	Stage   string               `json:"stage,omitempty"`
 	Error   string               `json:"error,omitempty"`
 	Elapsed string               `json:"elapsed"`
@@ -103,7 +104,8 @@ func runValidate(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// validateScenario loads cfg's scenario and runs one iteration.
+// validateScenario loads cfg's scenario and runs its setup, one iteration
+// with what setup returned, and its teardown.
 func validateScenario(cfg *runConfig) *validateResult {
 	res := &validateResult{Scenario: cfg.ScenarioPath}
 	collector := report.NewCollector()
@@ -125,16 +127,29 @@ func validateScenario(cfg *runConfig) *validateResult {
 		return res
 	}
 
-	iter, closeFn, err := buildIteration(cfg)
+	iter, closeFn, sc, err := buildIteration(cfg)
 	if err != nil {
 		return finish("load", err)
 	}
 	defer closeFn() //nolint:errcheck // best-effort cleanup
+	// The options must be ones run would accept. Flags are not checked here.
+	if err := setScenarioOptions(&runConfig{}, sc.options, nil); err != nil {
+		return finish("load", err)
+	}
+	if err := sc.setup(context.Background(), lifecycleTimeout(cfg)); err != nil {
+		return finish("setup", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
 	defer cancel()
-	if err := iter(ctx); err != nil {
-		return finish("iteration", err)
+	iterErr := iter(ctx)
+	// teardown runs after a failed iteration too, as it does after a run.
+	tdErr := sc.teardown(lifecycleTimeout(cfg))
+	if iterErr != nil {
+		return finish("iteration", iterErr)
+	}
+	if tdErr != nil {
+		return finish("teardown", tdErr)
 	}
 	return finish("", nil)
 }

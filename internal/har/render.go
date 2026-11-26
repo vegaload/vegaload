@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // jsString returns s as a JavaScript string literal.
@@ -105,7 +107,7 @@ func commentLinesFrom(first, rest, text string) string {
 	return sb.String()
 }
 
-func render(source string, reqs []*request, res *Result) string {
+func render(source string, reqs []*request, res *Result, think ThinkTime) string {
 	var sb strings.Builder
 	w := sb.WriteString
 
@@ -151,9 +153,28 @@ func render(source string, reqs []*request, res *Result) string {
 	w("// in several kinds of place, a JSON field wins, then a response header,\n")
 	w("// then a Set-Cookie, then an input. Two places of the same kind stay a\n")
 	w("// TODO, and an older response is not used. Anything else that looks\n")
-	w("// like it changes on every run is a TODO. Waits are not written: the\n")
-	w("// scenario API has no sleep. A scenario has no cookie jar. A cookie an\n")
-	w("// earlier response did not set is still a secret.\n")
+	w("// like it changes on every run is a TODO. A cookie an earlier response\n")
+	w("// did not set is still a secret. The cookie jar sends back the cookies\n")
+	w("// a server set, so the copies below are only needed with -no-cookies.\n")
+	w("//\n")
+	grouped := false
+	for _, q := range reqs {
+		grouped = grouped || q.page != ""
+	}
+	if grouped {
+		w("// Each page of the recording is a group(), and each call's report row\n")
+		w("// is named after its path, with {id} for a part that looks like an id.\n")
+	} else {
+		w("// Each call's report row is named after its path, with {id} for a part\n")
+		w("// that looks like an id.\n")
+	}
+	switch think.Mode {
+	case ThinkNone:
+		w("// No waits are written (-think-time none).\n")
+	default:
+		w("// The sleep() calls are the waits between requests (-think-time " + think.String() + ").\n")
+		w("// Sleep time is not in any call's latency.\n")
+	}
 	w("\n")
 
 	if len(res.EnvNames) > 0 {
@@ -176,35 +197,94 @@ func render(source string, reqs []*request, res *Result) string {
 		w("    if (env[name] === undefined) throw new Error(\"set \" + name + \" and pass -secret-env \" + name);\n")
 		w("  }\n\n")
 	}
-	lastPage := ""
+	var carried []string
+	for _, q := range reqs {
+		for _, e := range q.emits {
+			carried = append(carried, e.name)
+		}
+	}
+	// A value carried from one page to a later one must outlive its group.
+	hoist := grouped && len(carried) > 0
+	if hoist {
+		w(commentLinesFrom("  let ", "    ", strings.Join(carried, ", ")+";"))
+		w("\n")
+	}
+	page, open := "", false
 	for i, q := range reqs {
 		n := i + 1
-		if q.page != "" && q.page != lastPage {
-			w("  // ---- page: " + oneLine(q.page) + "\n")
-			lastPage = q.page
+		if grouped && (q.page != page || i == 0) {
+			if open {
+				w("  });\n\n")
+			}
+			w(sleepLine("  ", q.sleep))
+			page, open = q.page, q.page != ""
+			if open {
+				w("  group(" + jsString(oneLine(q.page)) + ", () => {\n")
+			}
+		} else {
+			w(indent(sleepLine("  ", q.sleep), open))
 		}
-		want := q.status
-		if want >= 300 && want < 400 {
-			want = 0
-		}
-		w(fmt.Sprintf("  // %d. %s (the recording had %d)\n", n, oneLine(q.label), q.status))
-		for _, note := range q.notes {
-			w(commentLinesFrom("  // TODO: ", "  //       ", note))
-		}
-		w(renderCall(n, q))
-		w(fmt.Sprintf("  expectStatus(r%d, %d, %s);\n", n, want, jsString(q.label)))
-		for _, e := range q.emits {
-			w(fmt.Sprintf("  const %s = %s;\n", e.name, e.expr))
-		}
-		w("\n")
+		w(indent(renderRequest(n, q, hoist), open))
+	}
+	if open {
+		w("  });\n")
 	}
 	w("}\n")
 	return sb.String()
 }
 
+// renderRequest is one request: its comment, call, status check and the
+// values later requests read from it.
+func renderRequest(n int, q *request, hoisted bool) string {
+	var sb strings.Builder
+	w := sb.WriteString
+	want := q.status
+	if want >= 300 && want < 400 {
+		want = 0
+	}
+	w(fmt.Sprintf("  // %d. %s (the recording had %d)\n", n, oneLine(q.label), q.status))
+	for _, note := range q.notes {
+		w(commentLinesFrom("  // TODO: ", "  //       ", note))
+	}
+	w(renderCall(n, q))
+	w(fmt.Sprintf("  expectStatus(r%d, %d, %s);\n", n, want, jsString(q.label)))
+	for _, e := range q.emits {
+		if hoisted {
+			w(fmt.Sprintf("  %s = %s;\n", e.name, e.expr))
+		} else {
+			w(fmt.Sprintf("  const %s = %s;\n", e.name, e.expr))
+		}
+	}
+	w("\n")
+	return sb.String()
+}
+
+// sleepLine is the wait before a request, or "".
+func sleepLine(prefix string, d time.Duration) string {
+	if d <= 0 {
+		return ""
+	}
+	return prefix + "sleep(" + strconv.FormatFloat(d.Seconds(), 'f', -1, 64) + ");\n"
+}
+
+// indent moves every line of s two spaces in, when in is true.
+func indent(s string, in bool) string {
+	if !in || s == "" {
+		return s
+	}
+	lines := strings.SplitAfter(s, "\n")
+	for i, l := range lines {
+		if l != "" && l != "\n" {
+			lines[i] = "  " + l
+		}
+	}
+	return strings.Join(lines, "")
+}
+
 func helperSource(reqs []*request) string {
-	var header, cookie, hidden bool
+	var header, cookie, hidden, form bool
 	for _, q := range reqs {
+		form = form || q.multipart != nil
 		for _, e := range q.emits {
 			header = header || strings.Contains(e.expr, "header(")
 			cookie = cookie || strings.Contains(e.expr, "cookie(")
@@ -224,8 +304,28 @@ func helperSource(reqs []*request) string {
 	if hidden {
 		sb.WriteString(helperHidden)
 	}
+	if form {
+		sb.WriteString(helperMultipart)
+	}
 	return sb.String()
 }
+
+const helperMultipart = `// multipart builds a multipart/form-data body. Send it with the header
+// "Content-Type: multipart/form-data; boundary=" + boundary.
+function multipart(boundary, parts) {
+  let body = "";
+  for (const p of parts) {
+    body += "--" + boundary + "\r\n";
+    body += "Content-Disposition: form-data; name=\"" + p.name + "\"";
+    if (p.fileName !== undefined) body += "; filename=\"" + p.fileName + "\"";
+    body += "\r\n";
+    if (p.contentType) body += "Content-Type: " + p.contentType + "\r\n";
+    body += "\r\n" + p.value + "\r\n";
+  }
+  return body + "--" + boundary + "--\r\n";
+}
+
+`
 
 const helperHeader = `function header(res, name) {
   const want = name.toLowerCase();
@@ -307,7 +407,9 @@ func renderCall(n int, q *request) string {
 		opts = append(opts, "    headers: {\n"+strings.Join(hs, "")+"    },\n")
 	}
 	if q.hasBody {
-		if q.isJSON {
+		if q.multipart != nil {
+			opts = append(opts, "    body: "+renderMultipart(q.multipart)+",\n")
+		} else if q.isJSON {
 			opts = append(opts, "    body: JSON.stringify("+renderValue(q.jsonVal, "    ")+"),\n")
 		} else {
 			opts = append(opts, "    body: "+renderParts(q.text)+",\n")
@@ -316,6 +418,9 @@ func renderCall(n int, q *request) string {
 	if q.status >= 400 {
 		// Without it, the answer the recording had would count as a failed request.
 		opts = append(opts, fmt.Sprintf("    expectedStatuses: [%d],\n", q.status))
+	}
+	if q.name != "" {
+		opts = append(opts, "    name: "+jsString(q.name)+",\n")
 	}
 	var sb strings.Builder
 	url := renderParts(q.url)
@@ -328,5 +433,24 @@ func renderCall(n int, q *request) string {
 		sb.WriteString(", {\n" + strings.Join(opts, "") + "  }")
 	}
 	sb.WriteString(");\n")
+	return sb.String()
+}
+
+// renderMultipart is the multipart(...) call that builds a form's body.
+func renderMultipart(mp *multipartBody) string {
+	var sb strings.Builder
+	sb.WriteString("multipart(" + jsString(mp.boundary) + ", [\n")
+	for _, p := range mp.parts {
+		fields := []string{"name: " + jsString(p.name)}
+		if p.fileName != "" {
+			fields = append(fields, "fileName: "+jsString(p.fileName))
+		}
+		if p.contentType != "" {
+			fields = append(fields, "contentType: "+jsString(p.contentType))
+		}
+		fields = append(fields, "value: "+renderParts(p.value))
+		sb.WriteString("      { " + strings.Join(fields, ", ") + " },\n")
+	}
+	sb.WriteString("    ])")
 	return sb.String()
 }

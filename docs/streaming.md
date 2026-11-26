@@ -44,7 +44,7 @@ Delivery is at least once. A consumer dedupes on `(runId, seq)`. Unknown fields 
 | `run.finished` | Last event of a run that ran to its end, passed or not. |
 | `run.failed` | Last event of a run that could not run or was interrupted. |
 
-Every stream ends with exactly one of `run.finished` or `run.failed`, including on Ctrl-C (the process then exits 130 for SIGINT, or 143 for SIGTERM, as a process killed by that signal would). A run that VegaLoad refuses before it starts (a host that is not allowed, a flag that is not valid, a bad `-run-id`) sends no stream at all. A run whose scenario cannot be loaded or started sends `run.started` and then `run.failed`.
+Every stream ends with exactly one of `run.finished` or `run.failed`, including on Ctrl-C (the process then exits 130 for SIGINT, or 143 for SIGTERM, as a process killed by that signal would). The first Ctrl-C or SIGTERM stops the load and lets a scenario's `teardown` run before `run.failed`; a second one ends the stream at once. A run that VegaLoad refuses before it starts (a host that is not allowed, a flag that is not valid, a bad `-run-id`) sends no stream at all. A run whose scenario cannot be loaded or started, or whose `setup` fails, sends `run.started` and then `run.failed`. A scenario's `setup` runs before `run.started`, so the run's clock, and every point's offset, start when the load does.
 
 ### `run.started`
 

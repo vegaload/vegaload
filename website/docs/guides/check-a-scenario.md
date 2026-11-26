@@ -16,8 +16,10 @@ missing file, no `iteration()` in Python) and an iteration that fails (a
 wrong URL, a thrown error, a host that is not allowed). It makes real
 network calls, under the same host rules as `run`, so a host that is not
 localhost needs `-allow-target` or `-yes`. Any `check()` results are listed,
-and a failed check does not make the scenario invalid. Add `-output json`
-for a machine-readable result.
+and a failed check does not make the scenario invalid. A scenario with
+`setup` and `teardown` runs setup, the one iteration with what setup
+returned, then teardown. Options the run would refuse make the scenario not
+valid. Add `-output json` for a machine-readable result.
 
 | Exit code | Meaning                          |
 |-----------|----------------------------------|
@@ -26,5 +28,5 @@ for a machine-readable result.
 | 2         | Bad usage                        |
 
 From an agent, the `validate_scenario` tool does the same and returns
-`valid`, and for an invalid scenario the `stage` (`load` or `iteration`) and
-`error`.
+`valid`, and for an invalid scenario the `stage` (`load`, `setup`,
+`iteration` or `teardown`) and `error`.
